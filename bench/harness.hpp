@@ -15,10 +15,12 @@
 
 #include <tributary/traits.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace tributary::bench {
@@ -77,6 +79,38 @@ public:
 private:
     std::int64_t start_;
     double period_ns_;
+};
+
+// --- producer start gate -----------------------------------------------------
+
+// Hold every producer handle until the last one exists.
+//
+// Without this, threads spawned in a loop retire roughly in the order they
+// started, the consumer publishes their slots free, and registration -- which
+// takes the first free slot -- hands those same slots to threads that have not
+// started yet. Two ways that corrupts a measurement: a recycled slot id
+// restarts its per-producer sequence, which ordering_sink reports as a
+// violation that never happened; and fewer producers are live at once than the
+// phase claims, so probes/pass and scan width come out flatteringly low.
+//
+// Deliberately duplicated from the test rig rather than shared: the two rigs
+// are independent by design, which is also why `record` and `event` are
+// separate types. Keep them in step -- the argument is the same in both.
+class start_gate {
+public:
+    explicit start_gate(std::uint32_t parties) noexcept : parties_(parties) {}
+
+    // Arrive whether or not registration succeeded: a thread that returns early
+    // without arriving wedges every other thread here instead of letting a
+    // check fail and say why.
+    void arrive_and_wait() noexcept {
+        arrived_.fetch_add(1, std::memory_order_release);
+        while (arrived_.load(std::memory_order_acquire) < parties_) std::this_thread::yield();
+    }
+
+private:
+    std::uint32_t parties_;
+    std::atomic<std::uint32_t> arrived_{0};
 };
 
 // --- percentiles ------------------------------------------------------------

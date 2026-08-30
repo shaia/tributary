@@ -102,11 +102,19 @@ void under_stress(scan_policy scan) {
     ordering_sink sink(opt.max_producers);
     pipe.start(sink);
 
+    // Every producer holds its slot until the last has registered. Without it
+    // the early finishers' slots are recycled into the late starters, and a
+    // recycled id restarts its sequence -- which this phase's whole purpose is
+    // to report as a violation. See start_gate. (The churn phase below recycles
+    // slots deliberately, and carries a generation tag for exactly that reason.)
+    start_gate gate(kProducers);
+
     std::vector<std::thread> ts;
     ts.reserve(kProducers);
     for (std::uint32_t p = 0; p < kProducers; ++p) {
-        ts.emplace_back([&pipe] {
+        ts.emplace_back([&pipe, &gate] {
             auto h = pipe.register_producer();
+            gate.arrive_and_wait();
             if (!h) return;
             record r{};
             r.producer_id = h.id();

@@ -7,11 +7,49 @@
 // The exit code is derived from the failure count, so a violated invariant
 // fails the build rather than merely the eye of whoever is reading the output.
 
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <thread>
 
 namespace tributary::test {
+
+// A start gate for producer threads. Hold every handle until the last one
+// exists.
+//
+// Without it a test is quietly not testing what it says. Threads spawned in a
+// loop retire roughly in the order they started, the consumer publishes their
+// slots free, and registration -- which takes the first free slot -- hands
+// those same slots straight back to threads that have not started yet. The
+// symptom is an ordering "violation" that is nothing of the sort: a recycled
+// slot id restarts its per-producer sequence at 1, which is exactly what
+// ordering_sink is built to flag.
+//
+// Both places this bit were found the same way and neither was visible here.
+// On a 32-core developer machine sixteen producers all start before any
+// finishes, so the race never opens; the first CI run, on a 4-core runner,
+// failed test_pipeline immediately. That is why this is a shared type rather
+// than a remembered convention.
+//
+// Slot recycling is worth testing deliberately -- test_lifetime.cpp does -- but
+// not by accident, and not in the tests whose premise is N live producers.
+class start_gate {
+public:
+    explicit start_gate(std::uint32_t parties) noexcept : parties_(parties) {}
+
+    // Arrive unconditionally, whether or not registration succeeded: a thread
+    // that returns early without arriving wedges every other thread here
+    // instead of letting a check fail and say why.
+    void arrive_and_wait() noexcept {
+        arrived_.fetch_add(1, std::memory_order_release);
+        while (arrived_.load(std::memory_order_acquire) < parties_) std::this_thread::yield();
+    }
+
+private:
+    std::uint32_t parties_;
+    std::atomic<std::uint32_t> arrived_{0};
+};
 
 inline int g_failures = 0;
 inline int g_checks = 0;

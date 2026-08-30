@@ -33,11 +33,18 @@ void test_correctness(scan_policy scan) {
     ordering_sink sink(opt.max_producers);
     pipe.start(sink);
 
+    // Every producer holds its slot until the last one has registered. Without
+    // this the early finishers' slots are recycled into the late starters and
+    // the recycled ids restart their sequence at 1, which reads as an ordering
+    // violation and is not one. See start_gate.
+    start_gate gate(kProducers);
+
     std::vector<std::thread> producers;
     producers.reserve(kProducers);
     for (std::uint32_t p = 0; p < kProducers; ++p) {
-        producers.emplace_back([&pipe] {
+        producers.emplace_back([&pipe, &gate] {
             auto h = pipe.register_producer();
+            gate.arrive_and_wait();
             if (!h) return;
             for (std::uint32_t s = 1; s <= kPerProducer; ++s) h.push(make_event(h.id(), s));
         });
@@ -92,11 +99,18 @@ void test_scan_width() {
         for (std::uint32_t i = 0; i < kRegistered - kActive; ++i)
             idle.push_back(pipe.register_producer());
 
+        // Same reason as test_correctness, but the symptom here would be a
+        // measurement rather than a failure: recycled slots mean fewer
+        // producers active at once, so probes/pass would come out flatteringly
+        // low and the assertion below would pass without meaning it.
+        start_gate gate(kActive);
+
         std::vector<std::thread> ts;
         ts.reserve(kActive);
         for (std::uint32_t p = 0; p < kActive; ++p)
-            ts.emplace_back([&pipe] {
+            ts.emplace_back([&pipe, &gate] {
                 auto h = pipe.register_producer();
+                gate.arrive_and_wait();
                 if (!h) return;
                 for (std::uint32_t s = 1; s <= 50'000; ++s) h.push(make_event(h.id(), s));
             });
