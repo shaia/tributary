@@ -13,6 +13,7 @@
 #include <tributary/traits.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <span>
@@ -48,6 +49,11 @@ public:
     std::uint64_t batches() const noexcept { return batches_; }
     std::uint64_t violations() const noexcept { return violations_; }
 
+    // Whether this sink was ever handed a record from producer `id`. The shard
+    // tests assert slot ownership is disjoint, which means asserting an id
+    // reached exactly one shard's sink -- an outcome no counter can express.
+    bool saw(std::uint32_t id) const noexcept { return id < seen_.size() && seen_[id] != 0; }
+
 private:
     std::vector<std::uint64_t> last_;
     std::vector<std::uint8_t> seen_;  // not vector<bool>: no reason for a proxy reference here
@@ -74,6 +80,31 @@ struct counting_sink {
     std::uint64_t checksum = 0xcbf29ce484222325ULL;
     std::uint64_t records = 0;
     std::uint64_t batches = 0;
+};
+
+// Counts into an atomic, so a thread that is neither producer nor consumer can
+// watch delivery progress *while the pipeline runs*.
+//
+// Every other sink here is read only after stop() has joined the consumer,
+// where a plain counter is correct and cheaper. This one exists for the
+// missed-wakeup test, which has to observe when a record arrives rather than
+// how many arrived in total -- and reading a plain counter for that would be a
+// data race, which is precisely what the TSan legs are there to catch.
+class signalling_sink {
+public:
+    std::size_t write(std::span<const event> b) noexcept {
+        // release, pairing with the acquire in delivered(): a waiter that sees
+        // the count has also seen the records the count refers to.
+        delivered_.fetch_add(b.size(), std::memory_order_release);
+        return b.size();
+    }
+
+    std::uint64_t delivered() const noexcept {
+        return delivered_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<std::uint64_t> delivered_{0};
 };
 
 // Accepts at most `limit` records per call, so the pipeline has to retain,
