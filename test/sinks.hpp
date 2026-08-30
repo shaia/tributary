@@ -136,11 +136,18 @@ private:
 // Refuses everything until unblocked, then accepts everything. Stands in for a
 // socket whose peer has stopped reading and later resumes -- the case where a
 // remainder would be stranded if the consumer never called on_idle().
+//
+// `open_` is the one field here written by a thread other than the consumer:
+// the test flips it from the main thread to simulate the peer recovering,
+// while the consumer reads it in write() and on_idle(). As a plain bool that
+// is a data race, and TSan called it on the first CI run -- correctly. It read
+// as benign on x86 because a byte store is atomic in practice there, which is
+// exactly the reasoning the ARM64 leg exists to refuse.
 class stalling_sink {
 public:
     std::size_t write(std::span<const event> b) noexcept {
         ++batches_;
-        if (!open_) {
+        if (!is_open()) {
             ++refusals_;
             return 0;
         }
@@ -153,12 +160,14 @@ public:
     // arriving to drive a flush.
     bool on_idle() noexcept {
         ++idle_calls_;
-        return open_ && refusals_ > 0;
+        return is_open() && refusals_ > 0;
     }
 
     void close() noexcept { ++closes_; }
 
-    void open() noexcept { open_ = true; }
+    // acquire/release, not relaxed: opening the sink is meant to be the moment
+    // everything the test did beforehand becomes visible to the consumer.
+    void open() noexcept { open_.store(true, std::memory_order_release); }
 
     std::uint64_t records() const noexcept { return records_; }
     std::uint64_t refusals() const noexcept { return refusals_; }
@@ -166,7 +175,9 @@ public:
     std::uint64_t closes() const noexcept { return closes_; }
 
 private:
-    bool open_ = false;
+    [[nodiscard]] bool is_open() const noexcept { return open_.load(std::memory_order_acquire); }
+
+    std::atomic<bool> open_{false};
     std::uint64_t records_ = 0;
     std::uint64_t batches_ = 0;
     std::uint64_t refusals_ = 0;

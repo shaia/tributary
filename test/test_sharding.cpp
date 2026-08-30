@@ -66,20 +66,12 @@ struct registration {
 // Run `count` producer threads, each pushing `per` records through its own
 // handle, and report what each one was given.
 //
-// THE BARRIER IS LOAD-BEARING, and it is not about timing. Without it, threads
-// spawned in a loop finish and retire in the order they started, the consumer
-// publishes their slots free, and registration -- which takes the first free
-// slot in a shard -- hands those same slots to threads that have not started
-// yet. Measured on the first draft of this suite: 96 producers cycled through
-// 12 slots and never left leaf word 0, so the two-level bitmap this file exists
-// to test was never reached. The ordering assertions failed too, correctly: a
-// recycled slot id restarts its sequence at 1, which is a violation of exactly
-// the invariant ordering_sink checks.
-//
-// Holding every handle until the last one exists is what makes the fan-out
-// width real. Slot recycling is a good thing to test -- test_lifetime.cpp does
-// it deliberately -- but not by accident, and not in the test whose whole point
-// is that N producers are live at once.
+// THE GATE IS LOAD-BEARING, and it is not about timing. Measured on the first
+// draft of this suite: 96 producers cycled through 12 slots and never left leaf
+// word 0, so the two-level bitmap this file exists to test was never reached,
+// and the ordering assertions failed for a reason that had nothing to do with
+// ordering. See start_gate in harness.hpp for the mechanism -- the same defect
+// was hiding in test_pipeline.cpp, where only CI's 4-core runner exposed it.
 //
 // file-local, and every call site names both counts in a kProducers /
 // kPerProducer constant rather than passing a bare literal.
@@ -87,19 +79,14 @@ template <class Pipe>
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 std::vector<registration> run_producers(Pipe& pipe, std::uint32_t count, std::uint32_t per) {
     std::vector<registration> regs(count);
-    std::atomic<std::uint32_t> registered{0};
+    start_gate gate(count);
     std::vector<std::thread> ts;
     ts.reserve(count);
     for (std::uint32_t p = 0; p < count; ++p) {
-        ts.emplace_back([&pipe, &regs, &registered, count, p, per] {
+        ts.emplace_back([&pipe, &regs, &gate, p, per] {
             auto h = pipe.register_producer();
             if (h) regs[p] = registration{h.id(), h.shard(), true};
-
-            // Arrive unconditionally, success or not, or a failed registration
-            // would wedge every other thread here instead of failing a check.
-            registered.fetch_add(1, std::memory_order_release);
-            while (registered.load(std::memory_order_acquire) < count) std::this_thread::yield();
-
+            gate.arrive_and_wait();
             if (!h) return;
             for (std::uint32_t s = 1; s <= per; ++s) h.push(make_event(h.id(), s));
         });
