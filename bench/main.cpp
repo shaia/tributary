@@ -42,5 +42,6 @@ int main() {
     tributary::bench::bench_throughput();
     tributary::bench::bench_backpressure();
     tributary::bench::bench_scan_ab();
+    tributary::bench::bench_sharding();
     return tributary::bench::overall_verdict();
 }

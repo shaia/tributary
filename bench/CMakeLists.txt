@@ -13,7 +13,8 @@ add_executable(tributary_bench
   correctness.cpp
   throughput.cpp
   backpressure.cpp
-  scan_ab.cpp)
+  scan_ab.cpp
+  sharding.cpp)
 
 # Shares bin/ with the test binaries, so the sanitizer suffix matters here for
 # the same reason: benchmarking an ASan binary by accident is an easy mistake.
