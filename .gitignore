@@ -1,0 +1,15 @@
+build/
+build-*/
+bin/
+out/
+.cache/
+compile_commands.json
+
+# junction to ../claude/tributary; the config lives in that repo, not this one
+.claude/
+
+# editors
+.vs/
+.vscode/ipch/
+*.user
+*.swp
