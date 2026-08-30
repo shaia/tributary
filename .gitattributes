@@ -1,0 +1,4 @@
+# Edited on Windows, built and sanitized on Linux CI. Normalising to LF in the
+# repository keeps the two from disagreeing -- and keeps the clang-format gate
+# that Phase D adds from reporting every line of every file as changed.
+* text=auto eol=lf

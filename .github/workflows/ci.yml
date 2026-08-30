@@ -1,0 +1,85 @@
+# Three legs, deliberately. This is not the Phase D matrix -- it is the minimum
+# that can close the Phase B gate, pulled forward because the gate is
+# "TSan clean on Linux x86_64 and ARM64" and no developer machine here can run
+# TSan at all (clang rejects -fsanitize=thread for x86_64-pc-windows-msvc).
+#
+# ARM64 is the leg that matters. x86 is TSO and reorders exactly one pair,
+# StoreLoad, so it hides the reordering the acquire/release reasoning in
+# active_set.hpp and pipeline.hpp exists to prevent. A green x86 run is not
+# evidence that the ordering is correct; only aarch64 can say that.
+#
+# The Release leg is not redundant: a TSan failure needs a passing control, or
+# you cannot tell a race from a test that was broken to begin with.
+#
+# Still Phase D, deliberately absent: clang-tidy and clang-format gates, MSVC,
+# macOS, the TRIBUTARY_CACHE_LINE=128 build, and the example/ smoke test built
+# against the installed package.
+#
+# bench/ is not built here. It runs for minutes, and its numbers on a shared,
+# oversubscribed runner would describe the hypervisor rather than the library.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false # one arch failing must not hide the other's result
+      matrix:
+        include:
+          - name: linux-x64-release
+            runner: ubuntu-24.04
+            build_type: Release
+            sanitizer: ""
+          - name: linux-x64-tsan
+            runner: ubuntu-24.04
+            build_type: RelWithDebInfo
+            sanitizer: thread
+          - name: linux-arm64-tsan
+            runner: ubuntu-24.04-arm
+            build_type: RelWithDebInfo
+            sanitizer: thread
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: compiler version
+        run: clang++ --version
+
+      # RelWithDebInfo rather than Debug for the sanitizer legs: TSan needs
+      # frame pointers and symbols, which the flags already add, but an -O0
+      # build changes the timing enough that the park/wake windows this library
+      # cares about barely open.
+      - name: configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_CXX_COMPILER=clang++
+          -DTRIBUTARY_BUILD_TESTS=ON
+          -DTRIBUTARY_BUILD_BENCH=OFF
+          -DTRIBUTARY_SANITIZER=${{ matrix.sanitizer }}
+
+      - name: build
+        run: cmake --build build
+
+      # halt_on_error + a non-zero exitcode are what make a race fail the job.
+      # Without them TSan prints its report and the process still exits 0, so
+      # ctest passes and the gate silently means nothing.
+      - name: test
+        env:
+          TSAN_OPTIONS: halt_on_error=1 exitcode=66 second_deadlock_stack=1
+        run: ctest --test-dir build --output-on-failure
