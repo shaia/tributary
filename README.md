@@ -17,9 +17,8 @@ There is no shared writable state on the push path except one read-mostly bitmap
 streaming producer writes to that word **once** and then never again.
 
 > **Status: in development.** The core is being built in phases; see
-> [docs/PLAN.md](docs/PLAN.md) for the roadmap and gates, and
-> [.claude/CLAUDE.md](.claude/CLAUDE.md) for exactly where the work stands. Not yet released, not
-> yet API-stable.
+> [docs/PLAN.md](docs/PLAN.md) for the roadmap and the phase gates. Not yet released, not yet
+> API-stable.
 
 ## Why not just use a mutex and a deque?
 
