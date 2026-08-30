@@ -305,17 +305,59 @@ Three things are asserted, and one is deliberately not:
   Report the columns, draw no conclusion from them.
 
 Sharding, `poll()`/`run()` and thread placement landed early with the pipeline (they were cheaper to
-build in than to retrofit), but are only lightly tested — Phase B still owns proving them.
+build in than to retrofit), but are only lightly tested — Phase B owns proving them, and now does:
+`test/test_sharding.cpp` and `bench/sharding.cpp`.
 
 ### Phase B — production integration surface
 
-- Two-level `active_set` exercised with >64 producers
-- Sharded consumers: contiguous slot ranges, per-shard bitmap and park state on their own lines
-- `own_threads == false` + `poll()` / `run()`
-- `detail/numa.hpp` (`VirtualAllocExNuma` / `mbind`), first-touch as the portable default
-- `options::validate()` wired, `on_error` wired
-- Tests: missed-wakeup stress, >64 producers, shard disjointness, externally-driven mode
+- [x] Two-level `active_set` exercised with >64 producers
+- [x] Sharded consumers: contiguous slot ranges, per-shard bitmap and park state on their own lines
+- [x] `own_threads == false` + `poll()` / `run()`
+- [ ] `detail/numa.hpp` (`VirtualAllocExNuma` / `mbind`), first-touch as the portable default
+- [x] `options::validate()` wired, `on_error` wired
+- [x] Tests: missed-wakeup stress, >64 producers, shard disjointness, externally-driven mode —
+      `test/test_sharding.cpp`
 - **Gate:** TSan clean on Linux x86_64 **and ARM64**; sharded throughput scales with shard count
+
+#### Two deviations from the plan as written, recorded rather than left to be inferred
+
+**1. The TSan CI legs were pulled forward from Phase D.** This gate cannot be read from a development
+machine here — clang rejects `-fsanitize=thread` for `x86_64-pc-windows-msvc` — so for this phase CI
+is not a packaging concern, it is the only instrument that can read the gate at all.
+`.github/workflows/ci.yml` therefore exists early and holds **three legs only**: Linux x86-64 Release
+as a control, and TSan on x86-64 and ARM64. Everything else Phase D lists — clang-tidy and
+clang-format gates, MSVC, macOS, the `TRIBUTARY_CACHE_LINE=128` build, the installed-`example/` smoke
+test — is still Phase D and still unwritten.
+
+**2. `detail/numa.hpp` is deferred.** It is the one item here with no correctness argument riding on
+it: placement is a runtime property of the machine, `detail::make_aligned` is already the single
+choke point it plugs into, and no part of the gate depends on it. Phase B is **not** complete until
+it lands or is explicitly moved.
+
+#### Sharded throughput — the half of the gate that can be measured locally
+
+`bench/sharding.cpp`, phase 5, on the same 32-core x86-64 / clang 21 / `-O2` Release machine as the
+Phase A targets:
+
+```text
+shards  producers/shard | sustained M/s   vs 1 shard | busiest shard
+1       8               |         25.00       1.00x  |       100.0%
+2       4               |         49.51       1.98x  |        50.8%
+4       2               |         96.86       3.87x  |        25.9%
+```
+
+Gated at **≥1.5× per doubling**. Perfect 2× was never available — the rings, the bitmap and the
+producers are shared work that does not halve — so a symmetric target would fail the design for being
+imperfect rather than for being wrong. `busiest shard` is reported beside it because scaling measured
+on an unbalanced run would be measuring the imbalance.
+
+The sink cost is the load-bearing choice here, and it is the same methodological rule as the scan
+A/B's one level up: **measure the mechanism in the regime it exists for.** Sharding helps when the
+*sink*, not the queue, is the bottleneck. Against the near-free sink the other phases use, one
+consumer already outruns eight saturating producers, the shard column comes out flat, and the phase
+reports a true number that reads as "sharding does not work". Phase 5's sink therefore carries a
+deliberate fixed per-record cost — which is also why its M/s figures are **not** throughput figures
+for the library. Phase 2 has those.
 
 ### Phase C — variable-length records
 
