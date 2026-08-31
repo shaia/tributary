@@ -1,6 +1,6 @@
 # tributary
 
-A header-only C++20 library for getting records from many producer threads to one or more consumers,
+A header-only C++20 library for getting events from many producer threads to one or more consumers,
 fast, without unbounded memory and without a producer ever blocking indefinitely.
 
 Many streams joining one river.
@@ -12,16 +12,16 @@ Many streams joining one river.
 - **Each doubling of consumers nearly doubles throughput.** 1.98× with two, 3.87× with four.
 
 > **Status: in development.** Phases A and B are complete and their gates pass — Phase B's gate is a
-> clean ThreadSanitizer run on both x86-64 and ARM64. Phase C (variable-length records) has not
-> started. See [docs/PLAN.md](docs/PLAN.md) for the roadmap and the phase gates. Not yet released,
-> not yet API-stable.
+> clean ThreadSanitizer run on both x86-64 and ARM64. Phase C is under way: the drain seam is in,
+> variable-length events are not. See [docs/PLAN.md](docs/PLAN.md) for the roadmap and the phase
+> gates. Not yet released, not yet API-stable.
 
 ## What it's for
 
-Hot paths that generate small records faster than one consumer can write them, where stalling a
-producer is worse than losing a record:
+Hot paths that generate small events faster than one consumer can write them, where stalling a
+producer is worse than losing an event:
 
-- **Structured and application logging.** Every worker thread emits records; one thread owns the
+- **Structured and application logging.** Every worker thread emits events; one thread owns the
   file or socket. Each thread's lines stay in order, and an overload burst is dropped and counted
   instead of turning your request handlers into a queue for the disk.
 - **Metrics, tracing, and telemetry.** Counters and spans from every thread in the process,
@@ -34,7 +34,7 @@ producer is worse than losing a record:
 - **Game and simulation loops.** Worker threads submitting events to a single consumer that drains
   them at a frame boundary.
 
-The shape it fits: **many producers, small trivially-copyable records, per-producer ordering is
+The shape it fits: **many producers, small trivially-copyable events, per-producer ordering is
 enough, and bounded loss beats unbounded latency.** If you need ordering *across* producers, or your
 event rate is moderate, a mutex and a `std::deque` is the better engineering choice — see
 [The trade you are making](#the-trade-you-are-making).
@@ -73,10 +73,10 @@ struct event {                       // trivially copyable, small, no indirectio
 // A sink is any type with a noexcept write() that returns how much it accepted.
 struct alignas(tributary::default_traits::cache_line) counting_sink {
     std::size_t write(std::span<const event> b) noexcept {
-        records += b.size();
+        events += b.size();
         return b.size();             // accepted all of it
     }
-    std::uint64_t records = 0;
+    std::uint64_t events = 0;
 };
 
 int main() {
@@ -107,7 +107,7 @@ int main() {
 }
 ```
 
-`start()` is what makes the pipeline accept records, so it must come before any `push()` — a push
+`start()` is what makes the pipeline accept events, so it must come before any `push()` — a push
 before `start()` or after `stop()` returns `false` and is counted, not queued.
 
 `namespace trib = tributary;` is the suggested short alias. The library does not define it — that is
@@ -158,7 +158,7 @@ being contended over. Read it as slope, not as an absolute.
 free and is not reported here as though it were.
 
 **Consumer scan width.** The consumer loops; each time round is a **pass**, and checking one
-producer's ring for work is a **probe**. This run holds 8 producers sending at 100k rec/s each and
+producer's ring for work is a **probe**. This run holds 8 producers sending at 100k ev/s each and
 varies how many *idle* producers are also registered — the case the active bitmap exists for.
 
 ```text
@@ -179,7 +179,7 @@ idle producer is checked on every pass, forever. `bitmap` stays flat at ~8 — t
 sending — however many are registered. Latency follows: flat at 0.30 µs against a full scan rising
 to 0.50.
 
-**16 bitmap writes for 800k records** — two per producer. Before the lazy-clear fix, the same shape
+**16 bitmap writes for 800k events** — two per producer. Before the lazy-clear fix, the same shape
 of run wrote the bitmap **582,954** times. That single counter is how you know notification
 coalescing still holds.
 
@@ -195,7 +195,7 @@ shards  producers/shard | sustained M/s   vs 1 shard | busiest shard
 Two things this table is not:
 
 - **The M/s figures are deliberately sink-bound and are not throughput figures for the library.**
-  This phase uses a sink with a fixed per-record cost on purpose, because sharding only helps when
+  This phase uses a sink with a fixed per-event cost on purpose, because sharding only helps when
   the sink is the bottleneck; against a near-free sink one consumer already outruns eight producers
   and the column comes out flat. Read the *ratios*. The throughput table above has the throughput.
 - **Sharding buys cores.** S shards means S consumer threads. This is a per-machine claim, not a
@@ -226,7 +226,7 @@ struct alignas(tributary::default_traits::cache_line) my_sink {
     std::size_t write(std::span<const event> b) noexcept;
 
     // Optional. Called before the consumer sleeps and on every park timeout,
-    // so a partially written remainder gets retried even when no new records
+    // so a partially written remainder gets retried even when no new events
     // arrive. Without this a socket that returned EAGAIN strands its tail.
     // Return true if progress was made.
     bool on_idle() noexcept;
@@ -372,7 +372,7 @@ The counters that answer operational questions:
 
 | Field | Question it answers |
 |---|---|
-| `dropped`, `drop_fraction()` | Are we losing records, and what share? |
+| `dropped`, `drop_fraction()` | Are we losing events, and what share? |
 | `sink_backpressure` | Is the far side the bottleneck? Rising means the rings are about to drop |
 | `registration_failures` | Are callers silently unable to produce at all? |
 | `high_water` | How deep did any ring actually get? Proves memory stayed bounded |
@@ -382,7 +382,7 @@ And the two that say whether the design is still doing what it claims:
 | Field | Healthy |
 |---|---|
 | `probes_per_pass()` | ≈ the *active* producer count, not the registered count |
-| `bitmap_writes` | Negligible next to the record count — ~2 per producer, not per push |
+| `bitmap_writes` | Negligible next to the event count — ~2 per producer, not per push |
 
 `producer_stats` adds `id`, `shard`, `active`, `retiring`, `pushed`, `dropped`, `high_water`, and
 sampled `depth` — because "the pipeline is dropping" is less useful than "producer 37 is dropping".
@@ -401,9 +401,9 @@ first.
 |---|---|---|
 | `max_producers` | `64` | Producer slots. Rings are allocated on registration, so an unused slot costs nothing |
 | `consumers` | `1` | Consumer shards. Each needs its own sink |
-| `ring_capacity` | `4096` | Per producer, in elements. Power of two — the mask replaces a modulo |
-| `batch_capacity` | `2048` | Consumer staging buffer. One sink call covers up to this many records |
-| `drain_batch` | `512` | Fairness cap: records taken from one ring in one pass |
+| `ring_capacity` | `4096` | Per producer, in events. Power of two — the mask replaces a modulo |
+| `batch_capacity` | `2048` | Consumer staging buffer. One sink call covers up to this many events |
+| `drain_batch` | `512` | Fairness cap: events taken from one ring in one pass |
 | `full` | `drop_newest` | Or `spin_then_drop`. Both terminate; see below |
 | `push_spin` | `200` | `spin_then_drop` budget, in pause iterations |
 | `scan` | `bitmap` | Or `full_scan`, which is genuinely faster below a handful of producers |
@@ -429,9 +429,9 @@ production.
 
 ## Roadmap
 
-- **Done.** Fixed-size records, per-producer SPSC rings, the active-bitmap wakeup handshake,
+- **Done.** Fixed-size events, per-producer SPSC rings, the active-bitmap wakeup handshake,
   consumer sharding, bounded two-mode shutdown, NUMA binding and consumer pinning, the drain seam.
-- **Next (Phase C).** Variable-length records: a `bytes_channel`, zero-copy `try_claim`/`commit`,
+- **Next (Phase C).** Variable-length events: a `bytes_channel`, zero-copy `try_claim`/`commit`,
   and frame-boundary partial release. `basic_pipeline`'s third template parameter is the seam this
   plugs into — the drain strategy — so the ordering arguments do not have to be written twice.
 - **Later (Phase D).** `DESIGN.md`, MSVC and macOS in CI, the `TRIBUTARY_CACHE_LINE=128` build,
@@ -454,7 +454,7 @@ engineering cost paid by everyone who touches the code afterwards.
 
 Prefer the mutex when:
 
-- **Your event rate is moderate.** Below ~100k records/s the lock is essentially never contended and
+- **Your event rate is moderate.** Below ~100k events/s the lock is essentially never contended and
   the entire justification evaporates. Most systems that think they need this do not.
 - **You need global ordering.** Then per-producer rings are simply wrong, and merging the streams
   afterwards costs more than the lock ever did.
