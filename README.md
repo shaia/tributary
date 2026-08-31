@@ -69,7 +69,7 @@ your namespace to shorten, not ours.
 ## Writing a sink
 
 ```cpp
-struct my_sink {
+struct alignas(tributary::default_traits::cache_line) my_sink {
     // Return how many elements you accepted. Less than b.size() is
     // backpressure: the pipeline keeps the remainder and re-offers it.
     std::size_t write(std::span<const event> b) noexcept;
@@ -86,6 +86,13 @@ struct my_sink {
 
 `write` **must** be `noexcept` — the consumer thread has no handler above it, so an escaping
 exception is a `std::terminate`. Wrap a throwing sink in `tributary::unsafe_sink`.
+
+The `alignas` is not decoration. Each shard's sink is written by its own consumer thread and by no
+other, so two sinks sharing a cache line put two consumers in a write-write ping-pong on that line
+for the life of the run — a scaling ceiling that no test fails on and that looks like "sharding just
+doesn't help much". Aligning the sink type is what makes `my_sink sinks[4]` in the quickstart safe;
+it is also why `start()` takes a span of *pointers* rather than a span of sinks, so the four need not
+be contiguous at all.
 
 A sink must never buffer an unbounded remainder of its own. That converts a latency problem into a
 memory problem, and the memory problem arrives later, larger, and as an OOM kill. Return a short
