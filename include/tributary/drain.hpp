@@ -44,7 +44,7 @@ inline namespace TRIBUTARY_ABI {
 // for a strategy that stages nothing, and `drain_batch` is a fairness cap in
 // events for a fixed-size channel and in bytes for a variable-length one.
 struct drain_config {
-    std::size_t batch_capacity;  // staging buffer size, in events
+    std::size_t batch_capacity;  // staging buffer size
     std::size_t drain_batch;     // taken from one ring in one pass
 };
 
