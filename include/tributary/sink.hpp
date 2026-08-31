@@ -40,8 +40,8 @@ concept sink_for = requires(S& s, Batch b) {
 //
 // on_idle() is called before the consumer parks and again on every park
 // timeout, so a sink holding a partially written remainder gets a chance to
-// retry it even when no new records arrive. Without it a socket that returned
-// EAGAIN would strand its remainder until the next record happened to show up
+// retry it even when no new events arrive. Without it a socket that returned
+// EAGAIN would strand its remainder until the next event happened to show up
 // -- which, on a pipeline that has just gone quiet, may be never.
 //
 // Return true if progress was made; the consumer will then retry the flush
@@ -68,11 +68,11 @@ concept has_close = requires(S& s) {
 template <class Batch>
 struct null_sink {
     std::size_t write(Batch b) noexcept {
-        records += b.size();
+        events += b.size();
         ++batches;
         return b.size();
     }
-    std::uint64_t records = 0;
+    std::uint64_t events = 0;
     std::uint64_t batches = 0;
 };
 
@@ -82,7 +82,7 @@ struct null_sink {
 // Retrying a batch that just threw means retrying it forever, at whatever rate
 // the consumer spins, with the rings filling behind it -- a livelock dressed up
 // as durability. Dropping it loses data, but loses it visibly and at a bounded
-// rate, and failed_records() says exactly how much.
+// rate, and failed_events() says exactly how much.
 template <class Inner>
 class unsafe_sink {
 public:
@@ -123,12 +123,12 @@ public:
     }
 
     std::uint64_t failed_batches() const noexcept { return failed_batches_; }
-    std::uint64_t failed_records() const noexcept { return failed_records_; }
+    std::uint64_t failed_events() const noexcept { return failed_events_; }
 
 private:
     void report(std::string_view what, std::size_t n) noexcept {
         ++failed_batches_;
-        failed_records_ += n;
+        failed_events_ += n;
         if (on_error_) {
             // The handler is user code on the consumer thread. If it throws
             // too, there is nothing left to report to.
@@ -142,7 +142,7 @@ private:
     Inner* inner_;
     std::function<void(std::string_view)> on_error_;
     std::uint64_t failed_batches_ = 0;
-    std::uint64_t failed_records_ = 0;
+    std::uint64_t failed_events_ = 0;
 };
 
 }  // namespace TRIBUTARY_ABI

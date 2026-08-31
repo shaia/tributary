@@ -13,7 +13,7 @@
 // comes out flat, the phase reports a true fact, and the fact answers a
 // question nobody asked. Worse, it would read as "sharding does not work".
 //
-// So the sink here has a deliberate fixed cost per record, which makes the
+// So the sink here has a deliberate fixed cost per event, which makes the
 // CONSUMER the scarce resource. That is the only regime in which "throughput
 // scales with shard count" is a claim rather than a category error, and it is
 // the regime the option exists for. The cost is stated in the table so the
@@ -48,39 +48,39 @@ constexpr std::uint32_t kShardCounts[] = {1, 2, 4};
 constexpr std::uint32_t kProducers = 8;  // divisible by every shard count above
 constexpr int kReps = 5;
 constexpr std::int64_t kRunNs = 300'000'000;  // 0.3 s of saturating load per run
-constexpr std::uint64_t kClockEvery = 256;    // records between clock reads
+constexpr std::uint64_t kClockEvery = 256;    // events between clock reads
 
-// Cost per record, in dependent multiply steps. Picked so one consumer's
+// Cost per event, in dependent multiply steps. Picked so one consumer's
 // ceiling sits well below what eight saturating producers can offer, and well
-// above the per-record cost of the queue itself -- if the queue dominated, the
+// above the per-event cost of the queue itself -- if the queue dominated, the
 // arms would differ by scheduler noise and nothing else.
 constexpr std::uint32_t kSinkSpins = 24;
 
-// A sink that costs a fixed, deliberate amount per record. See the header.
+// A sink that costs a fixed, deliberate amount per event. See the header.
 //
 // A serial dependent chain, not a parallelisable one: out-of-order execution
 // would otherwise hide most of the cost behind the loop, and the "cost" would
 // vary with how much of the batch the core could keep in flight.
 class costly_sink {
 public:
-    std::size_t write(std::span<const record> b) noexcept {
+    std::size_t write(std::span<const event> b) noexcept {
         std::uint64_t h = checksum_;
         for (const auto& r : b) {
             h ^= r.seq;
             for (std::uint32_t i = 0; i < kSinkSpins; ++i) h = (h ^ 0x9e3779b97f4a7c15ULL) * 0x100000001b3ULL;
         }
         checksum_ = h;
-        records_ += b.size();
+        events_ += b.size();
         return b.size();
     }
 
-    [[nodiscard]] std::uint64_t records() const noexcept { return records_; }
+    [[nodiscard]] std::uint64_t events() const noexcept { return events_; }
     [[nodiscard]] std::uint64_t checksum() const noexcept { return checksum_; }
 
 private:
     // Carried across calls and read at the end, so the chain cannot be dropped.
     std::uint64_t checksum_ = 0xcbf29ce484222325ULL;
-    std::uint64_t records_ = 0;
+    std::uint64_t events_ = 0;
 };
 
 struct run_result {
@@ -100,7 +100,7 @@ run_result one_run(std::uint32_t shards) {
     // measure the spin budget instead of the consumers' combined ceiling.
     opt.full = full_policy::drop_newest;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
 
     std::vector<costly_sink> sinks(shards);
     std::vector<costly_sink*> ptrs;
@@ -116,7 +116,7 @@ run_result one_run(std::uint32_t shards) {
         ts.emplace_back([&pipe, &attempts, &elapsed, p] {
             auto h = pipe.register_producer();
             if (!h) return;
-            record r{};
+            event r{};
             r.producer_id = h.id();
             std::uint64_t n = 0;
             const std::int64_t t0 = now_ns();
@@ -147,8 +147,8 @@ run_result one_run(std::uint32_t shards) {
     std::uint64_t delivered = 0;
     std::uint64_t busiest = 0;
     for (const auto& s : sinks) {
-        delivered += s.records();
-        busiest = std::max(busiest, s.records());
+        delivered += s.events();
+        busiest = std::max(busiest, s.events());
     }
 
     run_result r;
@@ -160,10 +160,10 @@ run_result one_run(std::uint32_t shards) {
         delivered > 0 ? static_cast<double>(busiest) / static_cast<double>(delivered) : 0.0;
 
     const std::string at = " at " + std::to_string(shards) + " shard(s)";
-    // A throughput number from a run that lost track of its records is not a
+    // A throughput number from a run that lost track of its events is not a
     // throughput number.
     check(st.pushed + st.dropped == offered, "pushed + dropped == offered" + at);
-    check(delivered == st.pushed, "the shards between them delivered every accepted record" + at);
+    check(delivered == st.pushed, "the shards between them delivered every accepted event" + at);
     return r;
 }
 
@@ -204,7 +204,7 @@ void bench_sharding() {
     constexpr std::uint32_t kWidest = kShardCounts[kLevels - 1];
 
     std::printf("\n=== phase 5: sharded throughput ===\n");
-    std::printf("%u saturating producers, sink cost %u dependent multiplies/record;"
+    std::printf("%u saturating producers, sink cost %u dependent multiplies/event;"
                 " %d reps of %.1fs, median per statistic\n\n",
                 static_cast<unsigned>(kProducers), static_cast<unsigned>(kSinkSpins), kReps,
                 static_cast<double>(kRunNs) / 1e9);

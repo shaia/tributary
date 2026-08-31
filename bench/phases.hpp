@@ -28,7 +28,7 @@ void bench_backpressure();
 void bench_scan_ab();
 
 // 5. Does throughput scale with consumer shard count? Measured against a sink
-//    with a deliberate per-record cost, because that is the only regime in
+//    with a deliberate per-event cost, because that is the only regime in
 //    which sharding is meant to help -- see the file's header.
 void bench_sharding();
 

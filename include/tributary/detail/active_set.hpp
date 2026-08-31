@@ -9,18 +9,18 @@
 // and costs each an L1 hit. Read sharing is genuinely free; cost appears only on
 // writes, which require exclusive ownership and invalidate every other copy. So
 // the design rule is not "avoid shared state", it is "make shared state
-// read-mostly". A producer streaming millions of records per second sets its bit
+// read-mostly". A producer streaming millions of events per second sets its bit
 // once and then never touches the line again.
 //
 // THE ASYMMETRY THAT MAKES IT WORK
 //
 // A set bit means "maybe non-empty". A false positive costs one wasted probe; a
-// false negative loses a wakeup and strands a published record in a ring nobody
+// false negative loses a wakeup and strands a published event in a ring nobody
 // looks at. So bits are set eagerly and cleared lazily -- only on the consumer's
 // path to sleep, never after each drain. Clearing on every empty drain produces
 // write churn proportional to throughput: a lightly loaded ring goes briefly
 // empty between arrivals, the consumer clears, the producer immediately re-sets,
-// and the line ping-pongs on every record. That is the contention this mechanism
+// and the line ping-pongs on every event. That is the contention this mechanism
 // exists to avoid, reintroduced by the mechanism itself.
 //
 // TWO LEVELS
@@ -94,7 +94,7 @@ public:
         // buffer. Then: we read a set bit, skip the fetch_or, and return; the
         // consumer concurrently sees the ring empty (our store not yet
         // visible), clears the bit, re-checks, still sees empty, and parks. The
-        // record is now published with its bit clear, so the consumer will not
+        // event is now published with its bit clear, so the consumer will not
         // even probe this ring, and it sits there until this producer happens to
         // push again -- which it may never do.
         //
@@ -149,7 +149,7 @@ public:
     }
 
     // Idle path only. `still_busy(i)` must be an authoritative, cache-refreshing
-    // check: true if ring i still holds records or its producer is retiring.
+    // check: true if ring i still holds events or its producer is retiring.
     template <class Q>
     void reap(Q&& still_busy) {
         for (std::uint32_t w = 0; w < words_; ++w) {
@@ -163,7 +163,7 @@ public:
 
                 // The other half of the Dekker pair in signal(): clear first,
                 // then look again. If a producer published before our clear, the
-                // re-check sees its record; if it publishes after, it sees the
+                // re-check sees its event; if it publishes after, it sees the
                 // cleared bit and sets it itself. fetch_and is an RMW and so
                 // already a full barrier -- no explicit fence needed here.
                 leaf.fetch_and(~bit, std::memory_order_seq_cst);
@@ -230,7 +230,7 @@ private:
         }
         // Repair. A producer preempted between its leaf fetch_or and its summary
         // fetch_or leaves a non-empty word with no summary bit, and visit()
-        // would never look at it -- the records would wait for the park timeout.
+        // would never look at it -- the events would wait for the park timeout.
         // Sweeping every word here, rather than only the ones the summary points
         // at, closes that window for the cost of an O(words) read on the idle
         // path. The load is relaxed and usually finds the bit already set, so

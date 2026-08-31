@@ -11,7 +11,7 @@
 // The split between the two concepts below is the whole point of the seam, and
 // it is not arbitrary: `channel_for` is what the pipeline itself touches --
 // registration, retirement, the wakeup handshake, stats -- and every one of
-// those is the same whether records are fixed-size or variable-length.
+// those is the same whether events are fixed-size or variable-length.
 // `pop_batch` is the one member that is *not* channel-agnostic. It copies out
 // into a caller-provided array of `value_type`, which presumes both a staging
 // buffer and a fixed element size; a zero-copy channel hands the sink a span of

@@ -5,8 +5,8 @@ here — build, test, benchmark, or gate — depends on any sibling project.
 
 ## Context
 
-The problem: many producer threads generate small records and push them to one consumer that batches
-them to a sink. Very low latency, millions of records per second, minimal allocation, bounded memory,
+The problem: many producer threads generate small events and push them to one consumer that batches
+them to a sink. Very low latency, millions of events per second, minimal allocation, bounded memory,
 producers must not block indefinitely, and order preserved **per producer only**.
 
 That last clause is the one that grants rather than constrains. Global ordering could only be
@@ -17,7 +17,7 @@ active-producer bitmap with a Dekker wakeup handshake so the consumer does not p
 
 The ring, the slot lifetime protocol, the bitmap handshake, and the bounded two-mode shutdown are
 domain-agnostic. What a library has to add on top is runtime sizing rather than a compile-time
-capacity and record type, more than 64 producers, sharded consumers, variable-length records, and the
+capacity and event type, more than 64 producers, sharded consumers, variable-length events, and the
 operational surface: an exception boundary, thread placement, NUMA, packaging, and TSan in CI.
 
 ---
@@ -51,14 +51,14 @@ be correct and needlessly expensive.
 (~15–20 cycles) out of an 18–29 ns push. `add()` remains for the genuinely multi-writer counters.
 
 **3. A backpressured sink must never be able to strand its remainder.**
-If `flush()` is reached only when a drain pass moved records, and returns early when nothing is
+If `flush()` is reached only when a drain pass moved events, and returns early when nothing is
 staged, then a sink holding a partial write has no way to retry it once the traffic stops. The
 remainder sits there indefinitely — and it sits there precisely when the far side is in trouble.
 
 → `sink::write` returns an accepted count and the pipeline retains the remainder; an optional
 `on_idle()` is called before parking and on every park timeout.
 `test_backpressure.cpp::test_stalled_sink_recovers` holds this: a sink that refuses, then recovers,
-with no new records arriving to drive another flush.
+with no new events arriving to drive another flush.
 
 **4. Retired slots are reclaimed on every pass, not only when idle.**
 Gating reclamation behind the idle path — after an `if (n > 0) continue;` — means it never runs on a
@@ -67,7 +67,7 @@ new producers cannot register even though slots are logically available. Every s
 producer thread that silently produces nothing at all.
 
 Measured on the churn test (40 waves of 8 producers through 16 slots): **144 of 320 registrations
-succeeded**. A churn test that only asserts *registered* producers' records survive will never catch
+succeeded**. A churn test that only asserts *registered* producers' events survive will never catch
 this — it has to assert that registration itself succeeds.
 
 → `reclaim_if_pending()` runs on **every** pass. Its gate is an acquire load of a line the consumer
@@ -104,16 +104,16 @@ down, because it is the part that is easy to break later:
 - **Notify** only when the whole shard went empty → non-empty. This is what keeps bitmap writes
   proportional to producer count rather than to throughput.
 
-### Variable-length records (`bytes_channel`, `record.hpp`) — Phase C
+### Variable-length events (`bytes_channel`, `event.hpp`) — Phase C
 
 A bip-style ring with free-running byte counters over a power-of-two buffer, and **pad-to-wrap**: when
-a record won't fit before the wrap point, the producer emits a padding frame filling the tail and
-writes the record at offset 0. No record straddles the wrap, so `peek()` returns a contiguous,
+an event won't fit before the wrap point, the producer emits a padding frame filling the tail and
+writes the event at offset 0. No event straddles the wrap, so `peek()` returns a contiguous,
 frame-aligned span with **zero copy** — the sink writes ring memory directly and there is no staging
 buffer on this path at all.
 
 ```cpp
-struct record_header {              // 8 bytes
+struct event_header {              // 8 bytes
     std::uint32_t frame_length;     // total incl. header, multiple of 8, >= 8
     std::uint16_t type;             // frame_type::data | frame_type::padding
     std::uint16_t slack;            // 0..7; payload_length = frame_length - 8 - slack
@@ -121,16 +121,16 @@ struct record_header {              // 8 bytes
 ```
 
 Padding frames reach the sink as an explicit, documented wire element (as Aeron does), which keeps
-`peek()` O(1) instead of a header walk. `for_each_record(span, fn)` skips them for in-process
+`peek()` O(1) instead of a header walk. `for_each_event(span, fn)` skips them for in-process
 decoders.
 
 Partial accept rounds the sink's accepted count **down to a frame boundary** and releases only that,
 re-offering the rest. The sink never buffers, so memory stays bounded by the rings — this is what
 makes backpressure end-to-end rather than deferred into a `pending_` vector.
 
-**Why fixed and bytes channels differ:** for 32-byte records the staging copy is ~1–2 ns and buys
+**Why fixed and bytes channels differ:** for 32-byte events the staging copy is ~1–2 ns and buys
 batching across many rings into one sink call. For a 500-byte log line the copy is real and there are
-fewer records per batch, so cross-ring batching matters less than avoiding the copy. Different
+fewer events per batch, so cross-ring batching matters less than avoiding the copy. Different
 regimes, different answers — not an inconsistency, and say so in `DESIGN.md`.
 
 #### The `Channel` parameter is now the seam this needs — done
@@ -153,7 +153,7 @@ channel.
 - `drain_ring` copies out of the ring into `shard_state::stage`, a `std::vector<value_type>`, and
   `flush` compacts it with a `memmove` sized by `sizeof(value_type)`. The design above is zero-copy
   with **no staging buffer on that path at all**, and the Phase C gate is "no staging copy in the
-  profile". The staging model is not an implementation detail of the consumer loop; it is the record
+  profile". The staging model is not an implementation detail of the consumer loop; it is the event
   model, spelled into it.
 - `flush` advances `stage_head` by whatever count the sink returned. For a byte batch that count can
   land mid-frame — exactly what the design above forbids, since a partial accept must round **down to
@@ -262,11 +262,11 @@ Four self-checking phases in one binary, non-zero exit on any violated invariant
 below are for **this machine — 32-core x86-64, clang 21, `-O2`, Release** — and are meaningless on
 other hardware; re-establish them before reading a result on anything else.
 
-**1. Correctness under stress.** 16 producers × 200k records, run under both scan policies. Asserts
+**1. Correctness under stress.** 16 producers × 200k events, run under both scan policies. Asserts
 per-producer sequence numbers arrive strictly increasing (gaps only where a drop was counted),
 `pushed + dropped == offered` exactly, a `drain` stop loses nothing, and ring depth never exceeded
 capacity. Plus producer churn: 40 waves × 8 producers recycled through the slots, asserting both that
-every record from a retired producer is still drained **and that all 320 registrations succeed**.
+every event from a retired producer is still drained **and that all 320 registrations succeed**.
 Pass/fail only — no timing target.
 
 **2. Throughput.** Push cost and overload are measured by **two separate runs**, because they cannot
@@ -314,7 +314,7 @@ Two methodology notes, both load-bearing:
 memory stays bounded, no producer blocks indefinitely, `abort` returns promptly, and a stalled sink
 that later recovers still drains. Pass/fail only.
 
-**4. Scan A/B.** 8 active producers at 100k rec/s each, varying how many idle producers are also
+**4. Scan A/B.** 8 active producers at 100k ev/s each, varying how many idle producers are also
 registered.
 
 ```text
@@ -330,20 +330,20 @@ registered  scan   | target    got |  target   got | target    got
 64          bitmap |    1.3   0.30 |     7.9  7.99 |      8     16
 ```
 
-`got` is 8 active producers at 100k rec/s, 5 reps of 1 s, median per statistic, drop-free throughout.
+`got` is 8 active producers at 100k ev/s, 5 reps of 1 s, median per statistic, drop-free throughout.
 **Every p50 target is beaten, by 3–5×**, and probes/pass matches to two decimals.
 
 Three things are asserted, and one is deliberately not:
 
 - `probes/pass` for `full_scan` tracks registration (8 → 16 → 32 → 64) while `bitmap` stays flat at
   ~8 regardless. This is the follow-up's claim, measured rather than assumed.
-- **16 bitmap writes for 800k records** — two per producer, against a run that offered 800,000.
+- **16 bitmap writes for 800k events** — two per producer, against a run that offered 800,000.
   Coalescing is the mechanism; this number is how you know it still holds. Before the lazy-clear fix
   the same shape of run wrote the bitmap **582,954** times.
 
   Two notes on this column. The count is **two** per producer, not one: a streaming producer sets its
   bit once, the consumer clears it on its way to sleep, and the producer sets it again on the next
-  record. That is coalescing working, not leaking. And it is **non-zero under `full_scan` too** — the
+  event. That is coalescing working, not leaking. And it is **non-zero under `full_scan` too** — the
   `n/a` above — because `scan_policy` here selects the scan *only* and the wakeup handshake runs
   under both. A target of `0` there would presume a design where `full_scan` also drops the
   handshake, which would vary two things at once and is exactly what this A/B refuses to do.
@@ -428,7 +428,7 @@ A/B's one level up: **measure the mechanism in the regime it exists for.** Shard
 *sink*, not the queue, is the bottleneck. Against the near-free sink the other phases use, one
 consumer already outruns eight saturating producers, the shard column comes out flat, and the phase
 reports a true number that reads as "sharding does not work". Phase 5's sink therefore carries a
-deliberate fixed per-record cost — which is also why its M/s figures are **not** throughput figures
+deliberate fixed per-event cost — which is also why its M/s figures are **not** throughput figures
 for the library. Phase 2 has those.
 
 #### TSan — the half of the gate only CI can read
@@ -457,15 +457,15 @@ The anticipated failure mode did not appear: TSan's `std::atomic_thread_fence` m
 conservative, and a report against the `seq_cst` fence in `active_set::signal` would have needed
 reading against the argument there before being believed. Nothing to read.
 
-### Phase C — variable-length records
+### Phase C — variable-length events
 
 - [x] Decide the drain seam **first**, while `fixed_channel` is still the only channel. Done: the
   `drain_strategy` extraction, as `channel.hpp` (`channel_for`, `staged_channel`) and `drain.hpp`
   (`drain_config`, `staged_drain`), with `Drain` as `basic_pipeline`'s third parameter. See "The
   `Channel` parameter is now the seam this needs" above for the decision, the gate, and the one
   thing still owed on it.
-- `record.hpp`, `bytes_channel`, zero-copy `try_claim`/`commit`, frame-boundary partial release
-- Tests: wrap-with-padding, exact payload round-trip, zero-length and maximum-size records, and a
+- `event.hpp`, `bytes_channel`, zero-copy `try_claim`/`commit`, frame-boundary partial release
+- Tests: wrap-with-padding, exact payload round-trip, zero-length and maximum-size events, and a
   partial-accept sink asserting the output is exactly the concatenation of what was pushed
 - **Gate:** ASan + TSan clean; no staging copy in the profile
 
@@ -478,7 +478,7 @@ reading against the argument there before being believed. Nothing to read.
   `TRIBUTARY_CACHE_LINE=128` build; clang-tidy and clang-format gates
 - **The clang-format gate will fail on day one unless `.clang-format` is reconciled first.** The
   codebase does not currently conform to its own config, and this is not drift in the code — it is
-  the config failing to record two deliberate choices. `IndentPPDirectives` is unset, so it defaults
+  the config failing to event two deliberate choices. `IndentPPDirectives` is unset, so it defaults
   to `None`, while `thread.hpp` and `numa.hpp` both indent their platform `#if` ladders two spaces
   after the hash for readability; setting `IndentPPDirectives: AfterHash` with `PPIndentWidth: 2`
   takes `thread.hpp` from 10 violations to 1 and `numa.hpp` from 16 to 6. Separately `pipeline.hpp`
@@ -504,7 +504,7 @@ and duck-typed sinks behind `sink_for`/`has_on_idle`/`has_close`. The candidates
 and rejected, and the one seam that *is* missing is the `Channel` drain path above — not any of these.
 
 - **`scan_policy`/`full_policy` as template parameters.** The scan branch runs once per drain pass,
-  amortised over up to `drain_batch` records; the full-policy branch is reached only after a push has
+  amortised over up to `drain_batch` events; the full-policy branch is reached only after a push has
   already failed. Both are perfectly predicted. The price is two instantiations of the consumer loop —
   icache pressure on the exact loop being optimised — plus the loss of runtime reconfiguration and of
   the single-binary alternating A/B the benchmark methodology requires.

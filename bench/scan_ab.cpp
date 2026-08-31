@@ -26,32 +26,32 @@ namespace {
 
 // Eight active producers among many registered: the case the bitmap exists for.
 constexpr std::uint32_t kActive = 8;
-constexpr double kRatePerProducer = 100'000.0;  // records/s, each
+constexpr double kRatePerProducer = 100'000.0;  // events/s, each
 constexpr std::uint32_t kRegistered[] = {8, 16, 32, 64};
 constexpr int kReps = 5;
 constexpr std::int64_t kRunNs = 1'000'000'000;     // 1 s of paced load per run
 constexpr std::int64_t kStartDelayNs = 50'000'000; // every thread registers before t0
 
-// Sample 1 in 4. A clock read is ~25 ns; recording every record would make the
+// Sample 1 in 4. A clock read is ~25 ns; recording every event would make the
 // instrument a measurable share of the consumer's budget, and the measurement
 // would then be partly reporting itself.
 constexpr std::size_t kSampleEvery = 4;
 
 // This phase's sink, and only this phase's.
 //
-// One clock read per write() call rather than per record: a batch is drained
+// One clock read per write() call rather than per event: a batch is drained
 // together, so one arrival time for the batch is the honest granularity, and it
 // keeps the instrument off the path being measured.
 class latency_sink {
 public:
     explicit latency_sink(std::size_t reserve) { samples_.reserve(reserve); }
 
-    std::size_t write(std::span<const record> b) noexcept {
+    std::size_t write(std::span<const event> b) noexcept {
         const std::int64_t arrived = now_ns();
         // The phase counter carries across batch boundaries, making this a true
         // 1-in-N over the whole stream. Striding within each batch instead
         // (`i += kSampleEvery`) emits at least one sample per batch, and under
-        // this load the consumer drains batches of one to three records -- so
+        // this load the consumer drains batches of one to three events -- so
         // that spelling silently becomes ~100% sampling, overruns the buffer,
         // and puts a clock read back on the path it was meant to stay off.
         for (const auto& r : b) {
@@ -66,18 +66,18 @@ public:
             else
                 ++unsampled_;
         }
-        records_ += b.size();
+        events_ += b.size();
         return b.size();
     }
 
     std::vector<std::int64_t>& samples() noexcept { return samples_; }
-    [[nodiscard]] std::uint64_t records() const noexcept { return records_; }
+    [[nodiscard]] std::uint64_t events() const noexcept { return events_; }
     [[nodiscard]] std::uint64_t unsampled() const noexcept { return unsampled_; }
 
 private:
     std::vector<std::int64_t> samples_;
-    std::size_t since_ = 0;  // records seen since the last sample, across batches
-    std::uint64_t records_ = 0;
+    std::size_t since_ = 0;  // events seen since the last sample, across batches
+    std::uint64_t events_ = 0;
     std::uint64_t unsampled_ = 0;
 };
 
@@ -100,7 +100,7 @@ run_result one_run(scan_policy scan, std::uint32_t registered) {
     // consumer's ceiling, and drops are asserted to be zero.
     opt.full = full_policy::drop_newest;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
 
     const double expected = static_cast<double>(kActive) * kRatePerProducer *
                             (static_cast<double>(kRunNs) / 1e9);
@@ -129,7 +129,7 @@ run_result one_run(scan_policy scan, std::uint32_t registered) {
                 const std::int64_t due = pc.due(i);
                 if (due >= end) break;
                 pacer::spin_until(due);
-                record r{};
+                event r{};
                 r.producer_id = h.id();
                 r.seq = static_cast<std::uint32_t>(i + 1);
                 r.send_ns = due;  // the time it was DUE, not the time it was sent
@@ -200,7 +200,7 @@ void bench_scan_ab() {
     constexpr std::size_t kLevels = std::size(kRegistered);
 
     std::printf("\n=== phase 4: scan A/B ===\n");
-    std::printf("%u active producers at %.0fk rec/s each; %d reps of %.1fs, median per statistic\n\n",
+    std::printf("%u active producers at %.0fk ev/s each; %d reps of %.1fs, median per statistic\n\n",
                 static_cast<unsigned>(kActive), kRatePerProducer / 1000.0, kReps,
                 static_cast<double>(kRunNs) / 1e9);
 
@@ -234,7 +234,7 @@ void bench_scan_ab() {
         check_le(bmp[i].probes_per_pass, kActive + 2,
                  "bitmap probes only the active producers" + at);
 
-        // Coalescing. A notify per record would be a wakeup per record, which is
+        // Coalescing. A notify per event would be a wakeup per event, which is
         // categorically worse than the polling it replaces.
         check_le(bmp[i].bitmap_writes, 4.0 * kActive, "bitmap writes stayed negligible" + at);
 

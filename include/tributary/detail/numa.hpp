@@ -7,7 +7,7 @@
 // registers it, and that is the right answer whenever a producer thread stays
 // where it started. Explicit binding is for the cases first touch cannot reach:
 // a registering thread that is not the thread that will push, a pool that
-// migrates before the first record, or a deployment that wants every ring on
+// migrates before the first event, or a deployment that wants every ring on
 // one node regardless of who registered it.
 //
 // Best-effort, in the same sense as thread.hpp: every entry point here reports

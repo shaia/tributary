@@ -56,9 +56,9 @@ void test_producer_churn() {
     std::printf("  %d waves x %d producers, registered=%llu pushed=%llu delivered=%llu\n", kWaves,
                 kThreads, static_cast<unsigned long long>(registered.load()),
                 static_cast<unsigned long long>(st.pushed),
-                static_cast<unsigned long long>(sink.records()));
+                static_cast<unsigned long long>(sink.events()));
 
-    check_eq(sink.records(), st.pushed, "every retired producer's records were still drained");
+    check_eq(sink.events(), st.pushed, "every retired producer's events were still drained");
     check_eq(st.pushed + st.dropped, registered.load() * kPer,
              "accounting survived slot recycling (this is what folding retired counters buys)");
     check(pipe.drain_completed(), "drain finished within its deadline");
@@ -83,7 +83,7 @@ void test_retire_while_full() {
     std::printf("\nretirement with a backed-up ring\n");
 
     // A producer that fills its ring and then leaves. The consumer must drain
-    // what it published before the slot can be reused, or those records vanish.
+    // what it published before the slot can be reused, or those events vanish.
     options opt;
     opt.max_producers = 2;
     opt.ring_capacity = 64;
@@ -107,7 +107,7 @@ void test_retire_while_full() {
     for (int i = 0; i < 100; ++i) drained += pipe.poll(0, sink);
     pipe.close(0, sink);
 
-    check_eq(sink.records, pushed, "a retired producer's full ring was drained, not discarded");
+    check_eq(sink.events, pushed, "a retired producer's full ring was drained, not discarded");
     check(drained > 0, "poll() reported the work it did");
 
     pipe.stop(stop_mode::abort);
@@ -146,7 +146,7 @@ void test_slot_reuse_is_allocation_free() {
     }
     pipe.stop(stop_mode::drain);
 
-    check_eq(sink.records(), total, "200 register/retire rounds lost nothing");
+    check_eq(sink.events(), total, "200 register/retire rounds lost nothing");
     check_eq(pipe.snapshot().pushed, total, "counters survived 200 recycles");
 }
 

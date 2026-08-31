@@ -1,17 +1,17 @@
 #pragma once
 //
-// The drain seam: how records get from a channel into a sink.
+// The drain seam: how events get from a channel into a sink.
 //
 // Everything else in the consumer loop -- the slot lifetime protocol, the
 // Dekker wakeup handshake, park/wake, reclaim_retired, the two-mode bounded
-// shutdown -- is the same whatever a record is. This is the part that is not,
-// and it is exactly the part that differs between record models:
+// shutdown -- is the same whatever an event is. This is the part that is not,
+// and it is exactly the part that differs between event models:
 //
 //   staged      copy out of the ring into a contiguous buffer, then hand the
-//               sink one batch spanning many rings. For a 32-byte record the
+//               sink one batch spanning many rings. For a 32-byte event the
 //               copy is ~1-2 ns and buys batching, so it is the right trade.
 //   zero-copy   hand the sink the ring's own memory. For a 500-byte log line
-//               the copy is real and there are fewer records per batch, so
+//               the copy is real and there are fewer events per batch, so
 //               cross-ring batching matters less than not copying. (Phase C.)
 //
 // Different regimes, different answers -- not an inconsistency. Splitting it
@@ -42,17 +42,17 @@ inline namespace TRIBUTARY_ABI {
 // Both fields are denominated in whatever the channel counts, which is why they
 // live here rather than in the pipeline: `batch_capacity` has no meaning at all
 // for a strategy that stages nothing, and `drain_batch` is a fairness cap in
-// elements for a fixed-size channel and in bytes for a variable-length one.
+// events for a fixed-size channel and in bytes for a variable-length one.
 struct drain_config {
-    std::size_t batch_capacity;  // staging buffer size, in elements
+    std::size_t batch_capacity;  // staging buffer size, in events
     std::size_t drain_batch;     // taken from one ring in one pass
 };
 
-// Copy-out drain for a channel of fixed-size records.
+// Copy-out drain for a channel of fixed-size events.
 template <class Channel, class Traits = default_traits>
 class staged_drain {
     static_assert(staged_channel<Channel>,
-                  "staged_drain copies records out with pop_batch(value_type*, n) into a buffer of "
+                  "staged_drain copies events out with pop_batch(value_type*, n) into a buffer of "
                   "value_type; a channel without that member -- a zero-copy one, say -- needs its "
                   "own drain strategy passed as basic_pipeline's third argument");
 
@@ -76,7 +76,7 @@ public:
                 flush(sink);
                 // The sink refused everything and the staging buffer is still
                 // full. Stop pulling: this is backpressure doing its job, and
-                // the records stay in the rings where the memory bound and the
+                // the events stay in the rings where the memory bound and the
                 // drop policy already apply to them.
                 if (staged_ == stage_.size()) break;
             }
@@ -90,9 +90,9 @@ public:
     }
 
     // One sink call per batch, so the syscall a socket sink makes is amortised
-    // over up to batch_capacity records.
+    // over up to batch_capacity events.
     //
-    // Returns how many records the sink accepted, and the caller needs that
+    // Returns how many events the sink accepted, and the caller needs that
     // return value rather than a before/after comparison of the fields: every
     // exit path below leaves stage_head_ at 0, so an outside observer cannot
     // tell a short accept from a flat refusal by looking.
@@ -129,7 +129,7 @@ public:
     // True while the sink still owes us an accept. The pipeline's idle path
     // tests this to decide whether a partially written batch needs unsticking
     // before it parks -- the one place a stalled sink gets a retry with no new
-    // records arriving to drive one.
+    // events arriving to drive one.
     [[nodiscard]] bool pending() const noexcept { return staged_ > stage_head_; }
 
     [[nodiscard]] std::uint64_t backpressure() const noexcept { return backpressure_.get(); }
@@ -140,8 +140,8 @@ private:
     // stage_.size(), not a fourth field, for that reason. Verify with the layout
     // dump after touching this, not by reading it.
     std::vector<value_type> stage_;
-    std::size_t staged_{0};      // records written into stage_
-    std::size_t stage_head_{0};  // records already accepted by the sink
+    std::size_t staged_{0};      // events written into stage_
+    std::size_t stage_head_{0};  // events already accepted by the sink
     std::size_t drain_batch_;
     TRIBUTARY_NO_UNIQUE_ADDRESS detail::counter<Traits::collect_stats> backpressure_;
 };

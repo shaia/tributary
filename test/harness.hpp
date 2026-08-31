@@ -83,7 +83,7 @@ inline int summary(const char* suite) {
     return g_failures == 0 ? 0 : 1;
 }
 
-// The record every test uses. 32 bytes, trivially copyable, no indirection --
+// The event every test uses. 32 bytes, trivially copyable, no indirection --
 // the shape the fixed-size path is designed for, and the shape the benchmark
 // numbers are quoted against.
 struct event {
@@ -93,7 +93,7 @@ struct event {
     std::byte payload[16];
 };
 
-static_assert(sizeof(event) == 32, "keep the test record small: two per cache line");
+static_assert(sizeof(event) == 32, "keep the test event small: two per cache line");
 
 inline event make_event(std::uint32_t id, std::uint32_t seq, std::int64_t stamp = 0) {
     event e{};

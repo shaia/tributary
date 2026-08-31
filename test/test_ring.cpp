@@ -98,7 +98,7 @@ void test_bounds_and_fifo() {
     event out[kCap]{};
     check_eq(ring.pop_batch(out, kCap), kCap, "one batch drains the whole ring");
     for (std::size_t i = 0; i < kCap; ++i)
-        check_eq(out[i].seq, i + 1, "record " + std::to_string(i) + " came out in order");
+        check_eq(out[i].seq, i + 1, "event " + std::to_string(i) + " came out in order");
     check(ring.empty_now(), "the ring is empty after a full drain");
 }
 
@@ -126,9 +126,9 @@ void test_wrap() {
             ++next_pop;
         }
     }
-    check(next_pop > 20, "the wrap test actually moved records (" + std::to_string(next_pop - 1) +
+    check(next_pop > 20, "the wrap test actually moved events (" + std::to_string(next_pop - 1) +
                              " through)");
-    check(true, "wrap preserved FIFO order across " + std::to_string(next_push - 1) + " records");
+    check(true, "wrap preserved FIFO order across " + std::to_string(next_push - 1) + " events");
 }
 
 void test_partial_drain() {
@@ -148,7 +148,7 @@ void test_partial_drain() {
 // throughput but that nothing is lost, duplicated, or reordered.
 void test_two_thread_handoff() {
     std::printf("\ntwo-thread handoff\n");
-    constexpr std::uint32_t kRecords = 2'000'000;
+    constexpr std::uint32_t kEvents = 2'000'000;
     fixed_channel<event> ring(1024);
 
     std::atomic<std::uint64_t> received{0};
@@ -173,7 +173,7 @@ void test_two_thread_handoff() {
         }
     });
 
-    for (std::uint32_t s = 1; s <= kRecords; ++s) {
+    for (std::uint32_t s = 1; s <= kEvents; ++s) {
         // Retry rather than drop: this test is about the ring never losing or
         // reordering, so the producer waits for room instead of exercising a
         // drop policy that belongs one layer up.
@@ -182,8 +182,8 @@ void test_two_thread_handoff() {
     done.store(true, std::memory_order_release);
     consumer.join();
 
-    check_eq(received.load(), kRecords, "every record crossed the ring exactly once");
-    check_eq(order_violations.load(), 0, "records arrived in strict FIFO order");
+    check_eq(received.load(), kEvents, "every event crossed the ring exactly once");
+    check_eq(order_violations.load(), 0, "events arrived in strict FIFO order");
     check(ring.high_water() <= ring.capacity(), "depth never exceeded capacity");
 }
 

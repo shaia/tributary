@@ -63,7 +63,7 @@ struct registration {
     bool ok = false;
 };
 
-// Run `count` producer threads, each pushing `per` records through its own
+// Run `count` producer threads, each pushing `per` events through its own
 // handle, and report what each one was given.
 //
 // THE GATE IS LOAD-BEARING, and it is not about timing. Measured on the first
@@ -141,20 +141,20 @@ void test_wide_bitmap(scan_policy scan) {
     std::printf("  producers=%u highest slot=%u pushed=%llu dropped=%llu delivered=%llu\n",
                 kProducers, highest, static_cast<unsigned long long>(st.pushed),
                 static_cast<unsigned long long>(st.dropped),
-                static_cast<unsigned long long>(sink.records()));
+                static_cast<unsigned long long>(sink.events()));
 
     check(highest >= 64, tag + "producers actually reached past the first leaf word");
     check(ids_are_distinct(regs, opt.max_producers), tag + "every producer held its own slot");
     check_eq(st.registration_failures, 0, tag + "all 96 producers got a slot");
     check_eq(sink.violations(), 0, tag + "per-producer order preserved across words");
     check_eq(st.pushed + st.dropped, offered, tag + "every push accounted for");
-    check_eq(sink.records(), st.pushed, tag + "drain shutdown lost nothing");
+    check_eq(sink.events(), st.pushed, tag + "drain shutdown lost nothing");
     check(pipe.drain_completed(), tag + "drain finished within its deadline");
     check(st.high_water <= opt.ring_capacity, tag + "ring depth stayed bounded");
 
     // The mechanism, not just the outcome. Coalescing has to survive the second
     // level: the summary fetch_or is an extra write per empty->non-empty word
-    // transition, and if it ever ran per record instead this is where it shows.
+    // transition, and if it ever ran per event instead this is where it shows.
     check(st.bitmap_writes < offered / 1000,
           tag + "bitmap writes stayed negligible with a summary word (" +
               std::to_string(st.bitmap_writes) + " for " + std::to_string(offered) + ")");
@@ -205,13 +205,13 @@ void test_high_leaf_words() {
     check_eq(sink.violations(), 0, "per-producer order preserved in the high words");
     check_eq(st.pushed + st.dropped, offered, "every push accounted for");
 
-    // The claim under test: a record published against a bit in a high leaf
+    // The claim under test: an event published against a bit in a high leaf
     // word is found. If the summary were cleared out from under a set leaf bit,
-    // or if visit() skipped a word the summary did not point at, these records
+    // or if visit() skipped a word the summary did not point at, these events
     // would reach the sink only via the park timeout -- or, at shutdown, only
     // via final_drain's unconditional full scan. Asserting the drain is
     // lossless does not distinguish those, so the timing assert below does.
-    check_eq(sink.records(), st.pushed, "nothing was stranded in a high-word ring");
+    check_eq(sink.events(), st.pushed, "nothing was stranded in a high-word ring");
 }
 
 // --- sharded consumers -----------------------------------------------------
@@ -245,7 +245,7 @@ void test_sharded_delivery() {
     std::uint64_t delivered = 0;
     std::uint64_t violations = 0;
     for (auto& s : sinks) {
-        delivered += s.records();
+        delivered += s.events();
         violations += s.violations();
     }
     std::printf("  shards=%u delivered=%llu of pushed=%llu\n", kShards,
@@ -257,7 +257,7 @@ void test_sharded_delivery() {
     check_eq(delivered, st.pushed, "the shards between them delivered everything");
     check_eq(violations, 0, "per-producer order preserved within each shard");
 
-    // Disjointness, which is the actual invariant. A record must reach exactly
+    // Disjointness, which is the actual invariant. An event must reach exactly
     // one shard's sink: two would mean the slot ranges overlap, zero would mean
     // a slot belongs to no shard at all. Counting totals cannot see either --
     // an overlap that double-delivers and a gap that drops would cancel.
@@ -270,8 +270,8 @@ void test_sharded_delivery() {
         if (seen_by > 1) disjoint = false;
         if (seen_by == 0) covered = false;
     }
-    check(disjoint, "no producer's records reached two shards");
-    check(covered, "every registered producer's records reached a shard");
+    check(disjoint, "no producer's events reached two shards");
+    check(covered, "every registered producer's events reached a shard");
 
     // The handle's cached shard is what the push path uses to pick a bitmap and
     // a park state, so a disagreement with the slot table would send wakeups to
@@ -322,7 +322,7 @@ void test_wide_and_sharded() {
     std::uint64_t delivered = 0;
     std::uint64_t violations = 0;
     for (auto& s : sinks) {
-        delivered += s.records();
+        delivered += s.events();
         violations += s.violations();
     }
 
@@ -355,7 +355,7 @@ void test_no_missed_wakeup(scan_policy scan) {
     std::printf("\nmissed wakeup under repeated parking [%s]\n", name);
 
     // The whole design of this test is in these two lines. spin_before_park=1
-    // makes the consumer park after two idle passes, so almost every record
+    // makes the consumer park after two idle passes, so almost every event
     // below arrives at a sleeping consumer -- the only state in which a lost
     // wakeup is unbounded. park_timeout=5s removes the backstop that normally
     // hides the failure: at the default 200 us a missed wakeup costs 200 us and
@@ -404,7 +404,7 @@ void test_no_missed_wakeup(scan_policy scan) {
         // while holding park_mu, so a push that follows an observed bump is a
         // push at a consumer committed to sleeping -- the only state in which a
         // lost wakeup is unbounded rather than a scheduling blip. Without the
-        // gate the record lands on a consumer that is still spinning and the
+        // gate the event lands on a consumer that is still spinning and the
         // wakeup path is never used: the first draft of this test recorded two
         // parks across three hundred rounds and passed, proving nothing.
         //
@@ -441,8 +441,8 @@ void test_no_missed_wakeup(scan_policy scan) {
                 static_cast<unsigned long long>(st.notifies), late);
 
     const std::string tag = std::string(name) + ": ";
-    check_eq(late, 0, tag + "every record woke the consumer well inside the park timeout");
-    check_eq(sink.delivered(), sent, tag + "no record was left stranded in a ring");
+    check_eq(late, 0, tag + "every event woke the consumer well inside the park timeout");
+    check_eq(sink.delivered(), sent, tag + "no event was left stranded in a ring");
 
     // Without this the test can pass by never testing anything -- see the gate
     // above. It is the assertion that the other two mean what they say.
@@ -488,7 +488,7 @@ void test_run_on_caller_threads() {
     std::uint64_t delivered = 0;
     std::uint64_t violations = 0;
     for (auto& s : sinks) {
-        delivered += s.records();
+        delivered += s.events();
         violations += s.violations();
     }
 
@@ -503,7 +503,7 @@ void test_multi_shard_poll() {
     std::printf("\nexternal driving (poll) across shards\n");
 
     constexpr std::uint32_t kShards = 2;
-    constexpr std::uint32_t kRecords = 5000;
+    constexpr std::uint32_t kEvents = 5000;
 
     options opt;
     opt.max_producers = 4;
@@ -516,7 +516,7 @@ void test_multi_shard_poll() {
     pipe.start(std::span<ordering_sink* const>(ptrs));
 
     // One handle per shard, so a single-threaded reactor has to service both.
-    // Draining only shard 0 would leave shard 1's records in their ring, which
+    // Draining only shard 0 would leave shard 1's events in their ring, which
     // is the failure a single-shard poll test cannot see.
     std::vector<decltype(pipe)::producer> handles;
     for (std::uint32_t i = 0; i < kShards; ++i) handles.push_back(pipe.register_producer());
@@ -524,7 +524,7 @@ void test_multi_shard_poll() {
           "round-robin registration put the two handles on different shards");
 
     std::uint64_t pushed = 0;
-    for (std::uint32_t s = 1; s <= kRecords; ++s) {
+    for (std::uint32_t s = 1; s <= kEvents; ++s) {
         for (auto& h : handles)
             if (h.push(make_event(h.id(), s))) ++pushed;
         if (s % 100 == 0)
@@ -541,12 +541,12 @@ void test_multi_shard_poll() {
     std::uint64_t delivered = 0;
     std::uint64_t violations = 0;
     for (auto& s : sinks) {
-        delivered += s.records();
+        delivered += s.events();
         violations += s.violations();
     }
 
-    check_eq(pushed, std::uint64_t{kRecords} * kShards, "nothing dropped while polling kept up");
-    check_eq(delivered, pushed, "poll() delivered every record from every shard");
+    check_eq(pushed, std::uint64_t{kEvents} * kShards, "nothing dropped while polling kept up");
+    check_eq(delivered, pushed, "poll() delivered every event from every shard");
     check_eq(violations, 0, "poll() preserved order across shards");
 
     pipe.stop(stop_mode::abort);

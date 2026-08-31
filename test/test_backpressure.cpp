@@ -27,7 +27,7 @@ namespace {
 void test_partial_accept() {
     std::printf("partial accept\n");
 
-    // The sink takes at most 7 records per call, so almost every flush leaves a
+    // The sink takes at most 7 events per call, so almost every flush leaves a
     // remainder that must be compacted and re-offered.
     options opt;
     opt.max_producers = 4;
@@ -55,12 +55,12 @@ void test_partial_accept() {
     const auto st = pipe.snapshot();
     std::printf("  pushed=%llu delivered=%llu short_writes=%llu backpressure_events=%llu\n",
                 static_cast<unsigned long long>(st.pushed),
-                static_cast<unsigned long long>(sink.records()),
+                static_cast<unsigned long long>(sink.events()),
                 static_cast<unsigned long long>(sink.short_writes()),
                 static_cast<unsigned long long>(st.sink_backpressure));
 
     check(sink.short_writes() > 0, "the sink really did accept short, exercising the retain path");
-    check_eq(sink.records(), st.pushed, "a short-accepting sink still received every record");
+    check_eq(sink.events(), st.pushed, "a short-accepting sink still received every event");
     check(st.sink_backpressure > 0, "backpressure was counted, not invisible");
     check(st.high_water <= opt.ring_capacity, "memory stayed bounded under backpressure");
 }
@@ -69,7 +69,7 @@ void test_stalled_sink_recovers() {
     std::printf("\nstalled sink recovery\n");
 
     // The defect this closes: a sink that refuses a batch and then recovers,
-    // with no new records arriving to drive another flush. Without on_idle()
+    // with no new events arriving to drive another flush. Without on_idle()
     // being called on the way to sleep, the remainder sits there forever.
     options opt;
     opt.max_producers = 2;
@@ -79,17 +79,17 @@ void test_stalled_sink_recovers() {
     stalling_sink sink;
     pipe.start(sink);
 
-    constexpr std::uint32_t kRecords = 500;
+    constexpr std::uint32_t kEvents = 500;
     {
         auto h = pipe.register_producer();
         check(h.valid(), "producer registered");
-        for (std::uint32_t s = 1; s <= kRecords; ++s) h.push(make_event(h.id(), s));
+        for (std::uint32_t s = 1; s <= kEvents; ++s) h.push(make_event(h.id(), s));
     }
 
     // Let the consumer discover the refusal, drain what it can, and go quiet.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     check(sink.refusals() > 0, "the sink refused at least one batch");
-    check_eq(sink.records(), 0, "nothing was delivered while the sink was closed");
+    check_eq(sink.events(), 0, "nothing was delivered while the sink was closed");
     check(sink.idle_calls() > 0, "on_idle() was called while the pipeline was quiet");
 
     // Recover. Crucially, push nothing more: only on_idle() can get this
@@ -99,13 +99,13 @@ void test_stalled_sink_recovers() {
     bool delivered = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < deadline) {
-        if (sink.records() >= kRecords) {
+        if (sink.events() >= kEvents) {
             delivered = true;
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    check(delivered, "a recovered sink drained without any new records arriving");
+    check(delivered, "a recovered sink drained without any new events arriving");
 
     pipe.stop(stop_mode::drain);
     check(sink.closes() > 0, "close() was called once the pipeline finished");
@@ -161,7 +161,7 @@ void test_overload_drops_rather_than_blocks() {
 
     check(st.dropped > 0, "overload produced drops rather than blocking");
     check_eq(st.pushed + st.dropped, std::uint64_t{kProducers} * kPer,
-             "every offered record was either accepted or counted as dropped");
+             "every offered event was either accepted or counted as dropped");
     check(st.high_water <= opt.ring_capacity, "memory stayed bounded while overloaded");
     // Generous, because this figure is dominated by OS preemption rather than
     // by the queue -- the point is that it is bounded at all.
@@ -189,7 +189,7 @@ void test_drop_newest_is_immediate() {
         if (h.push(make_event(h.id(), s))) ++accepted;
     const auto elapsed = std::chrono::steady_clock::now() - t0;
 
-    check_eq(accepted, opt.ring_capacity, "exactly capacity records were accepted");
+    check_eq(accepted, opt.ring_capacity, "exactly capacity events were accepted");
     check_eq(pipe.snapshot().dropped, 1000 - opt.ring_capacity, "the rest were counted as drops");
     check(elapsed < std::chrono::milliseconds(100),
           "drop_newest failed immediately instead of spinning");

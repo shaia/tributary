@@ -59,22 +59,22 @@ void test_correctness(scan_policy scan) {
     std::printf("  pushed=%llu dropped=%llu delivered=%llu probes/pass=%.2f bitmap_writes=%llu\n",
                 static_cast<unsigned long long>(st.pushed),
                 static_cast<unsigned long long>(st.dropped),
-                static_cast<unsigned long long>(sink.records()), st.probes_per_pass(),
+                static_cast<unsigned long long>(sink.events()), st.probes_per_pass(),
                 static_cast<unsigned long long>(st.bitmap_writes));
 
     check_eq(sink.violations(), 0, tag + "per-producer order preserved");
     check_eq(st.pushed + st.dropped, offered, tag + "every push accounted for (pushed + dropped)");
-    check_eq(sink.records(), st.pushed, tag + "drain shutdown lost nothing");
+    check_eq(sink.events(), st.pushed, tag + "drain shutdown lost nothing");
     check_eq(st.consumed, st.pushed, tag + "consumer counter agrees with the sink");
     check(pipe.drain_completed(), tag + "drain finished within its deadline");
     check(st.high_water <= opt.ring_capacity, tag + "ring depth stayed bounded");
     check_eq(st.registration_failures, 0, tag + "all producers got a slot");
 
     // The mechanism check, not just the outcome: coalescing is working only if
-    // writes to the shared line stay negligible next to the record count.
+    // writes to the shared line stay negligible next to the event count.
     check(st.bitmap_writes < offered / 1000,
           tag + "bitmap writes stayed negligible (" + std::to_string(st.bitmap_writes) + " for " +
-              std::to_string(offered) + " records)");
+              std::to_string(offered) + " events)");
 }
 
 void test_scan_width() {

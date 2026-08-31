@@ -48,7 +48,7 @@ void test_drain_loses_nothing() {
     const auto st = pipe.snapshot();
 
     check(pipe.drain_completed(), "drain reported success");
-    check_eq(sink.records(), st.pushed, "drain delivered every accepted record");
+    check_eq(sink.events(), st.pushed, "drain delivered every accepted event");
     check_eq(st.dropped, 0, "nothing was dropped at this rate");
 }
 
@@ -118,7 +118,7 @@ void test_producers_stop_being_accepted() {
 
     pipe.stop(stop_mode::drain);
     check(!h.push(make_event(h.id(), 2)), "push is refused after stop");
-    check_eq(sink.records(), 1, "the record pushed before stop was delivered");
+    check_eq(sink.events(), 1, "the event pushed before stop was delivered");
 
     h.release();
 }
@@ -158,7 +158,7 @@ void test_destructor_stops_a_running_pipeline() {
         // No explicit stop: the destructor must abort cleanly, join the
         // consumer, and not deadlock on the handle already being released.
     }
-    check(pushed > 0, "records were pushed before destruction");
+    check(pushed > 0, "events were pushed before destruction");
     check(true, "destroying a running pipeline did not hang or crash");
 }
 
@@ -172,13 +172,13 @@ void test_external_driving() {
     ordering_sink sink(opt.max_producers);
     pipe.start(sink);
 
-    constexpr std::uint32_t kRecords = 5000;
+    constexpr std::uint32_t kEvents = 5000;
     auto h = pipe.register_producer();
 
     // Interleave pushing and polling on one thread, the way a single-threaded
     // reactor integration would.
     std::uint64_t pushed = 0;
-    for (std::uint32_t s = 1; s <= kRecords; ++s) {
+    for (std::uint32_t s = 1; s <= kEvents; ++s) {
         if (h.push(make_event(h.id(), s))) ++pushed;
         if (s % 100 == 0) pipe.poll(0, sink);
     }
@@ -188,8 +188,8 @@ void test_external_driving() {
     }
     pipe.close(0, sink);
 
-    check_eq(pushed, kRecords, "nothing was dropped when polling kept up");
-    check_eq(sink.records(), pushed, "poll() delivered every record");
+    check_eq(pushed, kEvents, "nothing was dropped when polling kept up");
+    check_eq(sink.events(), pushed, "poll() delivered every event");
     check_eq(sink.violations(), 0, "poll() preserved order");
 
     pipe.stop(stop_mode::abort);

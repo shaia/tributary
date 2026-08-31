@@ -5,7 +5,7 @@
 // Every rule encoded here exists because violating it produces a number that
 // looks fine and is wrong. The two that do the most work:
 //
-//   open loop     a record's send time is decided before the run starts, so a
+//   open loop     an event's send time is decided before the run starts, so a
 //                 producer that falls behind reports its lateness instead of
 //                 quietly sliding its own schedule
 //   preallocated  nothing on a measured path allocates, locks, or grows
@@ -25,25 +25,25 @@
 
 namespace tributary::bench {
 
-// The record every phase moves. 32 bytes, trivially copyable, no indirection --
+// The event every phase moves. 32 bytes, trivially copyable, no indirection --
 // the shape the fixed-size path is designed for.
 //
 // Deliberately its own type rather than the test suite's `event`: the two rigs
 // are independent, and the 32-byte shape is the only thing they have to agree
 // on. That agreement is what the static_assert is for.
-struct record {
+struct event {
     std::uint32_t producer_id;
     std::uint32_t seq;    // per-producer, strictly increasing
     std::int64_t send_ns; // INTENDED send time -- never a clock read, see pacer
     std::byte payload[16];
 };
 
-static_assert(sizeof(record) == 32, "keep the record small: two per cache line");
+static_assert(sizeof(event) == 32, "keep the event small: two per cache line");
 
 // --- clock -----------------------------------------------------------------
 //
 // Inline because it is called from spin loops. A read is ~25 ns, which is the
-// entire reason latency is sampled rather than recorded per record.
+// entire reason latency is sampled rather than recorded per event.
 inline std::int64_t now_ns() noexcept {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                clock_type::now().time_since_epoch())
@@ -52,10 +52,10 @@ inline std::int64_t now_ns() noexcept {
 
 // --- open-loop pacing -------------------------------------------------------
 
-// Record `i` is due at `start + i * period`, fixed before the run begins.
+// Event `i` is due at `start + i * period`, fixed before the run begins.
 //
 // A producer that falls behind does **not** slide its schedule: it stamps the
-// time the record was *due*, so the resulting latency includes the lateness.
+// time the event was *due*, so the resulting latency includes the lateness.
 // That is the whole point. In a closed loop -- where the next send is timed
 // from the previous completion -- a stalled consumer throttles its own
 // producers and the stall disappears from the measurement. That is coordinated
@@ -94,8 +94,9 @@ private:
 // phase claims, so probes/pass and scan width come out flatteringly low.
 //
 // Deliberately duplicated from the test rig rather than shared: the two rigs
-// are independent by design, which is also why `record` and `event` are
-// separate types. Keep them in step -- the argument is the same in both.
+// are independent by design, which is also why `bench::event` and `test::event`
+// are separate types with the same shape rather than one shared one. Keep them
+// in step -- the argument is the same in both.
 class start_gate {
 public:
     explicit start_gate(std::uint32_t parties) noexcept : parties_(parties) {}

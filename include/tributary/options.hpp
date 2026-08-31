@@ -63,12 +63,12 @@ struct options {
     // queue, is the bottleneck.
     std::uint32_t consumers = 1;
 
-    // Per producer. Elements for a fixed-record pipeline, bytes for a
+    // Per producer. Events for a fixed-size pipeline, bytes for a
     // variable-length one. Power of two: the mask replaces a modulo.
     std::size_t ring_capacity = 4096;
 
-    // Consumer staging buffer, in elements. One sink call covers up to this
-    // many records across all of a shard's rings.
+    // Consumer staging buffer, in events. One sink call covers up to this
+    // many events across all of a shard's rings.
     std::size_t batch_capacity = 2048;
 
     // Fairness cap: events taken from one ring in one pass, so a hot producer

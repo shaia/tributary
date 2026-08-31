@@ -17,7 +17,7 @@
 //                       is this file's
 //   shutdown            two phases, two modes, always bounded by a deadline
 //
-// All four are the same whatever a record is, which is why the second record
+// All four are the same whatever an event is, which is why the second event
 // model arrives as a Drain parameter rather than as a second copy of this file.
 //
 // LIFETIME CONTRACT: the pipeline must outlive every producer handle it hands
@@ -55,7 +55,7 @@
 namespace tributary {
 inline namespace TRIBUTARY_ABI {
 
-// Drain is the seam that admits a second record model. Everything this class
+// Drain is the seam that admits a second event model. Everything this class
 // writes down -- the four protocols above -- is the same for all of them; the
 // copy-out into a staging buffer is not, so it lives behind this parameter
 // rather than in the loop. See drain.hpp.
@@ -185,10 +185,10 @@ public:
         std::uint32_t id() const noexcept { return id_; }
         std::uint32_t shard() const noexcept { return shard_; }
 
-        // Returns false if the record was dropped -- the ring was full and the
+        // Returns false if the event was dropped -- the ring was full and the
         // overload policy gave up, or the pipeline has stopped accepting.
         // Always check it: the drop is counted, but only you can decide what
-        // losing this particular record means.
+        // losing this particular event means.
         bool push(const value_type& v) noexcept {
             if (pipe_ == nullptr) return false;
             if (!pipe_->accepting_.load(std::memory_order_acquire)) return false;
@@ -363,7 +363,7 @@ public:
     }
 
     // One unit of consumer work, for driving from an existing reactor. Returns
-    // the number of records drained. Never sleeps and never parks -- pacing is
+    // the number of events drained. Never sleeps and never parks -- pacing is
     // the caller's business.
     //
     // After stop(), keep calling this until it returns 0 to complete the final
@@ -609,7 +609,7 @@ private:
 
     // The null check stays here rather than in the strategy: a slot can be
     // observed `claiming` with no ring yet, which is a fact about the lifetime
-    // protocol above and not about how records are drained.
+    // protocol above and not about how events are drained.
     template <class S>
     std::size_t drain_ring(shard_state& sh, S& sink, std::uint32_t i) {
         Channel* ch = slots_[i].channel.get();
@@ -632,7 +632,7 @@ private:
         reclaim_retired(sh);
 
         // The only place a sink holding a partially written batch gets unstuck
-        // when no new records are arriving.
+        // when no new events are arriving.
         if (sh.drain.pending()) {
             bool progressed = false;
             if constexpr (has_on_idle<S>) progressed = sink.on_idle();
@@ -655,14 +655,14 @@ private:
 
         // Defense in depth: one unconditional full scan immediately before
         // sleeping. The bitmap protocol above is believed correct, but the cost
-        // of being wrong is a record stranded in a ring nobody probes, and that
+        // of being wrong is an event stranded in a ring nobody probes, and that
         // is not a failure worth being clever about. Going to sleep is the only
         // moment where being wrong becomes unbounded, and it is also the moment
         // an O(slots) scan is affordable.
         return drain_full(sh, sink) > 0;
     }
 
-    // True if ring i still holds records, or its producer is retiring and the
+    // True if ring i still holds events, or its producer is retiring and the
     // slot has not been reclaimed yet.
     bool still_busy(std::uint32_t i) noexcept {
         producer_slot& sl = slots_[i];
@@ -820,9 +820,9 @@ private:
     bool drain_deadline_met_ = true;
 };
 
-// --- the two record models -------------------------------------------------
+// --- the two event models -------------------------------------------------
 
-// Fixed-size, trivially copyable records. A push is a memcpy into preallocated
+// Fixed-size, trivially copyable events. A push is a memcpy into preallocated
 // storage: no allocation, no indirection, no shared ownership on the hot path.
 template <class T, class Traits = default_traits>
 using pipeline = basic_pipeline<fixed_channel<T, Traits>, Traits>;
