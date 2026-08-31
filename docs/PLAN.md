@@ -507,7 +507,7 @@ reading against the argument there before being believed. Nothing to read.
   `TRIBUTARY_CACHE_LINE=128` build; clang-tidy and clang-format gates
 - **The clang-format gate will fail on day one unless `.clang-format` is reconciled first.** The
   codebase does not currently conform to its own config, and this is not drift in the code — it is
-  the config failing to event two deliberate choices. `IndentPPDirectives` is unset, so it defaults
+  the config failing to record two deliberate choices. `IndentPPDirectives` is unset, so it defaults
   to `None`, while `thread.hpp` and `numa.hpp` both indent their platform `#if` ladders two spaces
   after the hash for readability; setting `IndentPPDirectives: AfterHash` with `PPIndentWidth: 2`
   takes `thread.hpp` from 10 violations to 1 and `numa.hpp` from 16 to 6. Separately `pipeline.hpp`
