@@ -133,11 +133,12 @@ batching across many rings into one sink call. For a 500-byte log line the copy 
 fewer records per batch, so cross-ring batching matters less than avoiding the copy. Different
 regimes, different answers — not an inconsistency, and say so in `DESIGN.md`.
 
-#### The `Channel` parameter is not yet the seam this needs
+#### The `Channel` parameter is now the seam this needs — done
 
-`basic_pipeline<Channel, Traits>` looks like the extension point that will admit `bytes_channel`. It
-is not one yet, and finding that out at the start of Phase C means choosing under pressure between
-forking the pipeline and threading `if constexpr` through five methods. Decide it before then.
+`basic_pipeline<Channel, Traits>` looked like the extension point that will admit `bytes_channel`. It
+was not one, and finding that out at the start of Phase C would have meant choosing under pressure
+between forking the pipeline and threading `if constexpr` through five methods. The analysis below is
+what the decision was made against; the decision itself is at the end of the section.
 
 **What the pipeline requires of `Channel` today, none of it stated.** The parameter is an
 unconstrained `class Channel`, while sinks — the easier of the two to get right — are constrained by
@@ -170,16 +171,68 @@ duplicate the `seq_cst` fence ordering, the consumer-only publish of `free`, the
 pre-park `reclaim_retired`, and the `claiming` intermediate state, and would then have to keep two
 copies of each correct under a sanitizer that only runs in CI.
 
-→ Either extract the drain path into a `drain_strategy<Channel>` policy — staging for
-`fixed_channel`, zero-copy for `bytes_channel` — and add a `channel_for` concept that states the
-requirement above, or fork `basic_pipeline` and accept the duplication. Record which, and why, in
-`DESIGN.md`.
+→ **Decided: the policy extraction, not the fork.** `basic_pipeline` gained a third parameter,
+`Drain`, defaulting to `staged_drain<Channel, Traits>`; `channel.hpp` states the requirement above as
+a concept and `drain.hpp` holds the strategy. Carry this into `DESIGN.md` when it is written.
 
-**The gate on doing it.** Either way this is a behaviour-preserving refactor of the measured hot loop,
-so it is gated on Phase A's throughput phase re-run before and after: `ns/push` unchanged and still
-flat from 4 to 32 producers. Read it as slope, not as an absolute number — the same way the Phase A
-target is read, and for the same reason. Do it while `fixed_channel` is still the only channel: a
-refactor is far easier to prove free when only one instantiation has to keep passing.
+It was not a close call, and the size of the thing being moved is why: the staging model reached into
+exactly five places in a 761-line header — the three `shard_state` fields, `drain_ring`, `flush`, the
+pre-park unstick in `idle_work`, and `final_drain`'s bounded retry. A fork would have duplicated the
+other ~700 lines, which is the code the "things that are easy to get wrong" list is about, and would
+then have needed both copies kept correct under a sanitizer that only runs in CI. The whole cost of
+not forking was one policy class.
+
+Three details in the result are worth keeping written down, because each is a place the seam could be
+put back in the wrong spot later:
+
+- **`pop_batch` is not in `channel_for`.** It copies into a caller-provided array of `value_type`,
+  which presumes both a staging buffer and a fixed element size, so it sits in a second concept,
+  `staged_channel`, which is what `staged_drain` asserts rather than what the pipeline asserts. That
+  split *is* the seam. `test_ring.cpp` pins it with a channel that satisfies one and not the other,
+  plus a channel one member short that satisfies neither — without that negative control, "fixed
+  channel satisfies the concept" would be equally true of a vacuous concept.
+- **`drain_batch` and `batch_capacity` moved out of `hot_config` into `drain_config`.** Both are
+  denominated in whatever the channel counts, so they belong to the thing that interprets them. This
+  is the note above about `batch_capacity` being meaningless to a channel with no staging buffer,
+  applied.
+- **`flush()` returns the accepted count.** It used to return void and the two callers compared
+  `staged`/`stage_head` before and after to decide whether anything moved. That worked, but by
+  accident: every exit path from `flush` leaves `stage_head` at 0, so from outside the function the
+  variable is always 0 and only the change in `staged` carried the signal. Returning the count says
+  the same thing directly, and is what a zero-copy strategy will have to return anyway.
+
+**The gate, and how it was actually read.** This is a behaviour-preserving refactor of the measured
+hot loop, so the gate was Phase A's throughput phase before and after: `ns/push` unchanged and still
+flat from 4 to 32 producers, read as slope and one-sided.
+
+That gate turned out to be unreadable on this machine on the day, and the benchmark's own control
+column is what says so. `ns/push (no-signal)` is the raw ring with no pipeline in it — byte-identical
+code in both arms — and across five alternating A/B pairs it differed **between the arms by −16% to
++74%**. Any difference in the columns under test was smaller than the noise on code that did not
+change. The baseline binary failed the gate outright in three of its five runs, on three different
+marginal checks; the refactored binary passed 122/122 in all five.
+
+So the gate was read off the generated code instead, which is a stronger instrument for this
+particular question and was available because nothing about the change is data-dependent:
+
+```text
+function                     base    new    ordered mnemonic sequence
+producer::push               146     146    identical
+basic_pipeline::stop         190     190    identical
+drain_ring<drain_sink>       173     172    identical (one instruction's encoding wrapped)
+```
+
+`drain_ring` is where `staged_drain::take` and `flush` inline to, so that row is the refactored path
+itself. The push path and the shutdown path are untouched and prove it. Two producer thread bodies
+disassemble identically as well (340 and 330 instructions, zero differences).
+
+**What is still owed.** A quiet-machine re-run of phase 2, to confirm the absolute figures in the
+Phase A table still hold. Nothing in the disassembly suggests they will not, but "the code is the
+same" and "the numbers reproduce" are different claims and only one of them has been made.
+
+Doing this while `fixed_channel` was still the only channel is what made the code-level argument
+available at all: with one instantiation, "identical instructions" is a claim about the whole
+library rather than about one of two paths through it.
 
 ---
 
@@ -406,9 +459,11 @@ reading against the argument there before being believed. Nothing to read.
 
 ### Phase C — variable-length records
 
-- Decide the drain seam **first**, while `fixed_channel` is still the only channel —
-  `drain_strategy<Channel>` plus a `channel_for` concept, or a fork of `basic_pipeline`. See "The
-  `Channel` parameter is not yet the seam this needs" above. Gated on an unchanged throughput phase.
+- [x] Decide the drain seam **first**, while `fixed_channel` is still the only channel. Done: the
+  `drain_strategy` extraction, as `channel.hpp` (`channel_for`, `staged_channel`) and `drain.hpp`
+  (`drain_config`, `staged_drain`), with `Drain` as `basic_pipeline`'s third parameter. See "The
+  `Channel` parameter is now the seam this needs" above for the decision, the gate, and the one
+  thing still owed on it.
 - `record.hpp`, `bytes_channel`, zero-copy `try_claim`/`commit`, frame-boundary partial release
 - Tests: wrap-with-padding, exact payload round-trip, zero-length and maximum-size records, and a
   partial-accept sink asserting the output is exactly the concatenation of what was pushed

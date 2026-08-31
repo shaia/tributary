@@ -9,10 +9,16 @@
 //                       only the consumer may publish free
 //   wakeup handshake    a Dekker pair between active_set::signal() and reap(),
 //                       carrying the design's only seq_cst fence
-//   backpressure        a short accept from the sink is retained, compacted,
-//                       and re-offered, so slowness propagates into the rings
-//                       and finally into the drop policy -- never into memory
+//   backpressure        a short accept from the sink is retained and re-offered,
+//                       so slowness propagates into the rings and finally into
+//                       the drop policy -- never into memory. How the remainder
+//                       is held is the drain strategy's business (drain.hpp);
+//                       that it is held, and retried before the consumer parks,
+//                       is this file's
 //   shutdown            two phases, two modes, always bounded by a deadline
+//
+// All four are the same whatever a record is, which is why the second record
+// model arrives as a Drain parameter rather than as a second copy of this file.
 //
 // LIFETIME CONTRACT: the pipeline must outlive every producer handle it hands
 // out. A handle holds a raw pointer back and its destructor calls into the
@@ -20,11 +26,13 @@
 // would be an atomic refcount on the push path, which is exactly the contended
 // cache line this design exists to avoid.
 
+#include "channel.hpp"
 #include "detail/active_set.hpp"
 #include "detail/alloc.hpp"
 #include "detail/counter.hpp"
 #include "detail/numa.hpp"
 #include "detail/thread.hpp"
+#include "drain.hpp"
 #include "fixed_channel.hpp"
 #include "options.hpp"
 #include "sink.hpp"
@@ -36,7 +44,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -48,13 +55,19 @@
 namespace tributary {
 inline namespace TRIBUTARY_ABI {
 
-template <class Channel, class Traits = default_traits>
+// Drain is the seam that admits a second record model. Everything this class
+// writes down -- the four protocols above -- is the same for all of them; the
+// copy-out into a staging buffer is not, so it lives behind this parameter
+// rather than in the loop. See drain.hpp.
+template <channel_for Channel, class Traits = default_traits,
+          class Drain = staged_drain<Channel, Traits>>
 class basic_pipeline {
 public:
     using channel_type = Channel;
     using value_type = typename Channel::value_type;
     using batch_type = typename Channel::batch_type;
     using traits_type = Traits;
+    using drain_type = Drain;
 
     static constexpr std::size_t cache_line = Traits::cache_line;
 
@@ -94,10 +107,9 @@ private:
     // slots, so no two shards ever share a bitmap word, a park mutex, or a
     // counter line.
     struct alignas(cache_line) shard_state {
-        shard_state(std::uint32_t slot_count, std::uint32_t first, std::size_t batch_capacity)
-            : active(slot_count), begin(first), end(first + slot_count), count(slot_count) {
-            stage.resize(batch_capacity);
-        }
+        shard_state(std::uint32_t slot_count, std::uint32_t first, const drain_config& dc)
+            : active(slot_count), begin(first), end(first + slot_count), count(slot_count),
+              drain(dc) {}
 
         active_set_t active;
         std::uint32_t begin;
@@ -117,10 +129,11 @@ private:
         // consumer's counters.
         alignas(cache_line) TRIBUTARY_NO_UNIQUE_ADDRESS counter_t notifies;
 
-        // Consumer-local. No other thread touches these.
-        alignas(cache_line) std::vector<value_type> stage;
-        std::size_t staged{0};      // records written into stage
-        std::size_t stage_head{0};  // records already accepted by the sink
+        // Consumer-local. No other thread touches these. The strategy is 56
+        // bytes and `rotate` is read and written on every pass, so the two share
+        // a line and the drain's fields cost the loop no second one. `thread` is
+        // touched at start and join only and can fall wherever it lands.
+        alignas(cache_line) TRIBUTARY_NO_UNIQUE_ADDRESS Drain drain;
         std::uint32_t rotate{0};
         std::thread thread;
 
@@ -129,14 +142,15 @@ private:
         TRIBUTARY_NO_UNIQUE_ADDRESS counter_t rings_empty;
         TRIBUTARY_NO_UNIQUE_ADDRESS counter_t passes;
         TRIBUTARY_NO_UNIQUE_ADDRESS counter_t parks;
-        TRIBUTARY_NO_UNIQUE_ADDRESS counter_t backpressure;
     };
 
     // Read-only after construction. Copied out of `options` so the consumer
     // loop never touches that object, which holds a std::string and a
     // std::function and is several cold lines wide.
+    // What the drain interprets -- drain_batch, batch_capacity -- is not here:
+    // it is denominated in whatever the channel counts and lives with the
+    // strategy that reads it.
     struct hot_config {
-        std::size_t drain_batch;
         std::uint32_t spin_before_park;
         nanos park_timeout;
         scan_policy scan;
@@ -251,7 +265,8 @@ public:
                               "falling back to first touch");
         }
 
-        cfg_ = hot_config{opt_.drain_batch, opt_.spin_before_park, opt_.park_timeout, opt_.scan};
+        cfg_ = hot_config{opt_.spin_before_park, opt_.park_timeout, opt_.scan};
+        const drain_config dc{opt_.batch_capacity, opt_.drain_batch};
 
         // Covers the slot array and every shard_state below. Rings are not
         // allocated here -- they are bound separately in commission(), on the
@@ -268,7 +283,7 @@ public:
         shards_.reserve(opt_.consumers);
         for (std::uint32_t s = 0; s < opt_.consumers; ++s) {
             const std::uint32_t n = per + (s < extra ? 1U : 0U);
-            shards_.push_back(detail::make_aligned<shard_state>(n, first, opt_.batch_capacity));
+            shards_.push_back(detail::make_aligned<shard_state>(n, first, dc));
             for (std::uint32_t i = first; i < first + n; ++i) slots_[i].shard = s;
             first += n;
         }
@@ -424,7 +439,7 @@ public:
             s.passes += sh->passes.get();
             s.parks += sh->parks.get();
             s.notifies += sh->notifies.get();
-            s.sink_backpressure += sh->backpressure.get();
+            s.sink_backpressure += sh->drain.backpressure();
             s.bitmap_writes += sh->active.writes();
         }
         return s;
@@ -568,7 +583,7 @@ private:
             if (n == 0) sh.rings_empty.bump();
             total += n;
         });
-        if (total > 0) flush(sh, sink);
+        if (total > 0) sh.drain.flush(sink);
         return total;
     }
 
@@ -588,65 +603,21 @@ private:
             if (n == 0) sh.rings_empty.bump();
             total += n;
         }
-        if (total > 0) flush(sh, sink);
+        if (total > 0) sh.drain.flush(sink);
         return total;
     }
 
+    // The null check stays here rather than in the strategy: a slot can be
+    // observed `claiming` with no ring yet, which is a fact about the lifetime
+    // protocol above and not about how records are drained.
     template <class S>
     std::size_t drain_ring(shard_state& sh, S& sink, std::uint32_t i) {
         Channel* ch = slots_[i].channel.get();
         if (ch == nullptr) return 0;
 
-        std::size_t got = 0;
-        while (got < cfg_.drain_batch) {
-            if (sh.staged == sh.stage.size()) {
-                flush(sh, sink);
-                // The sink refused everything and the staging buffer is still
-                // full. Stop pulling: this is backpressure doing its job, and
-                // the records stay in the rings where the memory bound and the
-                // drop policy already apply to them.
-                if (sh.staged == sh.stage.size()) break;
-            }
-            const std::size_t room =
-                std::min(sh.stage.size() - sh.staged, cfg_.drain_batch - got);
-            const std::size_t n = ch->pop_batch(sh.stage.data() + sh.staged, room);
-            if (n == 0) break;
-            sh.staged += n;
-            got += n;
-        }
+        const std::size_t got = sh.drain.take(*ch, sink);
         sh.consumed.bump(got);
         return got;
-    }
-
-    // One sink call per batch, so the syscall a socket sink makes is amortised
-    // over up to batch_capacity records.
-    template <class S>
-    void flush(shard_state& sh, S& sink) {
-        if (sh.stage_head == sh.staged) {
-            sh.stage_head = 0;
-            sh.staged = 0;
-            return;
-        }
-        batch_type b(sh.stage.data() + sh.stage_head, sh.staged - sh.stage_head);
-        const std::size_t n = std::min(sink.write(b), b.size());
-        sh.stage_head += n;
-
-        if (sh.stage_head == sh.staged) {
-            sh.stage_head = 0;
-            sh.staged = 0;
-            return;
-        }
-
-        // Short accept. Compact the remainder to the front so the next drain
-        // has room at the tail; without this, staged stays pinned at capacity
-        // and the rings stop draining even after the sink recovers.
-        sh.backpressure.bump();
-        if (sh.stage_head > 0) {
-            std::memmove(sh.stage.data(), sh.stage.data() + sh.stage_head,
-                         (sh.staged - sh.stage_head) * sizeof(value_type));
-            sh.staged -= sh.stage_head;
-            sh.stage_head = 0;
-        }
     }
 
     // The idle path. Returns true if anything moved, in which case the caller
@@ -662,14 +633,13 @@ private:
 
         // The only place a sink holding a partially written batch gets unstuck
         // when no new records are arriving.
-        if (sh.staged > sh.stage_head) {
+        if (sh.drain.pending()) {
             bool progressed = false;
             if constexpr (has_on_idle<S>) progressed = sink.on_idle();
-            const std::size_t before_head = sh.stage_head;
-            const std::size_t before_staged = sh.staged;
-            flush(sh, sink);
-            if (progressed || sh.stage_head != before_head || sh.staged != before_staged)
-                return true;
+            // Not short-circuited: the retry is the point of being here, so the
+            // flush has to happen whatever on_idle() reported.
+            const bool moved = sh.drain.flush(sink) > 0;
+            if (moved || progressed) return true;
         } else if constexpr (has_on_idle<S>) {
             if (sink.on_idle()) return true;
         }
@@ -753,13 +723,12 @@ private:
 
         // Give a backpressured sink a bounded number of chances at the tail
         // rather than dropping it at the very last step.
-        for (int attempt = 0; attempt < 64 && sh.staged > sh.stage_head; ++attempt) {
+        for (int attempt = 0; attempt < 64 && sh.drain.pending(); ++attempt) {
             if constexpr (has_on_idle<S>) (void)sink.on_idle();
-            const std::size_t before = sh.stage_head;
-            flush(sh, sink);
-            if (sh.stage_head == before && sh.staged > sh.stage_head) std::this_thread::yield();
+            sh.drain.flush(sink);
+            if (sh.drain.pending()) std::this_thread::yield();
         }
-        if (sh.staged > sh.stage_head) report("sink would not accept the final batch");
+        if (sh.drain.pending()) report("sink would not accept the final batch");
 
         reclaim_retired(sh);
         if constexpr (has_close<S>) sink.close();

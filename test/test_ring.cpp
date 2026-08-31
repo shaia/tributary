@@ -6,10 +6,12 @@
 
 #include "harness.hpp"
 
+#include <tributary/channel.hpp>
 #include <tributary/fixed_channel.hpp>
 
 #include <atomic>
 #include <cstdint>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -17,6 +19,63 @@ using tributary::fixed_channel;
 using namespace tributary::test;
 
 namespace {
+
+// --- the channel contract ---------------------------------------------------
+//
+// Compile-time, because that is when it is meant to fail: a channel missing a
+// member should be told so at its own definition rather than from inside the
+// consumer loop.
+//
+// That fixed_channel satisfies channel_for proves nothing on its own -- a
+// vacuous concept would say the same -- so the two negative controls below are
+// the load-bearing half of this block.
+
+// Everything channel_for asks for and nothing beyond it: no pop_batch, which is
+// the shape a zero-copy channel has. It exists to pin the seam: if someone later
+// "tidies" pop_batch back into channel_for, this stops compiling, which is the
+// whole point.
+// The signatures have to mirror a real channel's, constness and all, so these
+// stay non-static however trivial their bodies are.
+// NOLINTBEGIN(readability-convert-member-functions-to-static)
+struct peek_only_channel {
+    using value_type = event;
+    using batch_type = std::span<const event>;
+
+    explicit peek_only_channel(std::size_t /*capacity*/) {}
+
+    bool try_push(const event& /*v*/) noexcept { return true; }
+    void note_drop(std::uint64_t /*n*/ = 1) noexcept {}
+    bool empty_now() noexcept { return true; }
+    std::uint64_t size_now() const noexcept { return 0; }
+    std::uint64_t pushed() const noexcept { return 0; }
+    std::uint64_t dropped() const noexcept { return 0; }
+    std::uint64_t high_water() const noexcept { return 0; }
+    std::uint64_t take_pushed() noexcept { return 0; }
+    std::uint64_t take_dropped() noexcept { return 0; }
+    void reset_stats() noexcept {}
+};
+// NOLINTEND(readability-convert-member-functions-to-static)
+
+// One member short. reset_stats is the one to omit: nothing on the hot path
+// needs it, so a channel author can get everything else right and only find out
+// when a recycled slot silently erases its predecessor's totals.
+struct no_reset_channel : peek_only_channel {
+    using peek_only_channel::peek_only_channel;
+    void reset_stats() = delete;
+};
+
+static_assert(tributary::channel_for<fixed_channel<event>>,
+              "fixed_channel must satisfy what the pipeline requires of a channel");
+static_assert(tributary::staged_channel<fixed_channel<event>>,
+              "and the copy-out drain's requirement, which it is the reason for");
+static_assert(tributary::channel_for<peek_only_channel>,
+              "a channel with no pop_batch still meets everything the pipeline itself needs -- "
+              "this is the seam a variable-length channel goes through");
+static_assert(!tributary::staged_channel<peek_only_channel>,
+              "and does not meet the staging drain's, which is what makes the split real rather "
+              "than decorative");
+static_assert(!tributary::channel_for<no_reset_channel>,
+              "one missing member fails the contract, so the contract is not vacuous");
 
 void test_bounds_and_fifo() {
     std::printf("bounds and FIFO\n");
