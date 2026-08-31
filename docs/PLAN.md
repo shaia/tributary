@@ -226,9 +226,38 @@ drain_ring<drain_sink>       173     172    identical (one instruction's encodin
 itself. The push path and the shutdown path are untouched and prove it. Two producer thread bodies
 disassemble identically as well (340 and 330 instructions, zero differences).
 
-**What is still owed.** A quiet-machine re-run of phase 2, to confirm the absolute figures in the
-Phase A table still hold. Nothing in the disassembly suggests they will not, but "the code is the
-same" and "the numbers reproduce" are different claims and only one of them has been made.
+**The quiet-machine re-run, and what it did and did not settle.** Three reps on a materially quieter
+box — p99 in phase 4 fell from 20–50 µs to 3–6 µs, which is how you know it was quieter. Two of the
+three were 122/122; the third tripped the 1-producer validity check at 69.8% success, with its whole
+column set visibly degraded, and is a perturbed run rather than a result.
+
+*Settled.* Phase 4 reproduces the recorded table on every statistic that carries a design claim:
+bitmap p50 flat at **0.30 µs** from 8 to 64 registered, `probes/pass` **7.99 against 63.94** at 64,
+and **16 bitmap writes** on every row of every rep. Phase 5 reproduces too — 1.83–1.95× per doubling
+against the ≥1.50 gate, busiest shard at 51.6–52.2% and 26.5–27.1%, and absolute M/s *above* the
+recorded figures. The gate criterion itself passes cleanly: `ns/push` does not climb from 4 to 32
+producers, 26.3 → 11.7 no-signal and 36.3 → 24.8 with the handshake, falling in all three reps.
+
+*Not settled, and it may not be settleable here.* The **absolute** phase 2 figures do not reproduce,
+and the control column is again the reason to blame the machine rather than the change:
+
+```text
+producers | ns/push no-signal | ns/push +bitmap | sustained M/s
+          | recorded    now   | recorded   now  | recorded   now
+4         |     16.3    26.3  |     29.1   36.3 |    333.9  269.5
+16        |     13.0    14.5  |     22.0   27.9 |    638.0  543.8
+32        |     10.4    11.7  |     22.2   24.8 |    619.1  648.0
+```
+
+`no-signal` at 4 producers is ~60% above its recorded value, on the raw ring, which contains none of
+the refactored code — and the pipeline columns deviate *less* than that control does. A change cannot
+be responsible for a deviation smaller than the one measured on code it never touched.
+
+The honest conclusion is that this is no longer a question about the refactor. **The Phase A absolute
+table is a per-machine artifact and this is not that machine any more**, whatever else has changed
+about it since. Re-establish the table before reading any absolute figure against it, exactly as the
+Phase A gate section already says to do on other hardware. The shape claims — slope, probes/pass,
+bitmap writes, shard ratios — are the portable ones, and all of them hold.
 
 Doing this while `fixed_channel` was still the only channel is what made the code-level argument
 available at all: with one instantiation, "identical instructions" is a claim about the whole
