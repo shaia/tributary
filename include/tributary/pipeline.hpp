@@ -11,10 +11,9 @@
 //                       carrying the design's only seq_cst fence
 //   backpressure        a short accept from the sink is retained and re-offered,
 //                       so slowness propagates into the rings and finally into
-//                       the drop policy -- never into memory. How the remainder
-//                       is held is the drain strategy's business (drain.hpp);
-//                       that it is held, and retried before the consumer parks,
-//                       is this file's
+//                       the drop policy -- never into memory. This file owns
+//                       that the remainder is held at all and that it is retried
+//                       before the consumer parks; drain.hpp owns how it is held
 //   shutdown            two phases, two modes, always bounded by a deadline
 //
 // All four are the same whatever an event is, which is why the second event
