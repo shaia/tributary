@@ -106,6 +106,12 @@ struct options {
 
     // -1 leaves placement to first touch by the registering thread, which is
     // the right default on both Linux and Windows.
+    //
+    // A node number binds every allocation the pipeline makes -- slots, shard
+    // state, and each producer's ring -- to that node instead. Best-effort: if
+    // the platform cannot bind, or the node does not exist, allocation falls
+    // back to first touch and on_error is called once at construction. Nothing
+    // in this library's correctness depends on placement.
     int numa_node = -1;
 
     // --- diagnostics ------------------------------------------------------
@@ -127,6 +133,11 @@ struct options {
         if (!pin_consumers_to.empty() && pin_consumers_to.size() != consumers)
             return "pin_consumers_to must be empty or hold exactly one cpu id per consumer";
         if (park_timeout <= nanos::zero()) return "park_timeout must be positive";
+        // Only the shape is checked here. Whether the node actually exists is a
+        // property of the machine, not of the configuration, so it degrades to
+        // first touch with an on_error report rather than refusing to start --
+        // the same split thread pinning makes.
+        if (numa_node < -1) return "numa_node must be -1 (first touch) or a node number";
         return std::nullopt;
     }
 };

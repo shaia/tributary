@@ -23,6 +23,7 @@
 #include "detail/active_set.hpp"
 #include "detail/alloc.hpp"
 #include "detail/counter.hpp"
+#include "detail/numa.hpp"
 #include "detail/thread.hpp"
 #include "fixed_channel.hpp"
 #include "options.hpp"
@@ -236,7 +237,26 @@ public:
     explicit basic_pipeline(options opt) : opt_(std::move(opt)) {
         if (auto bad = opt_.validate()) throw std::invalid_argument("tributary: " + *bad);
 
+        // Say once, here, that a requested node cannot be honoured. Binding is
+        // best-effort everywhere below -- a failure falls back to first touch
+        // rather than throwing -- and without this the only symptom would be
+        // every ring quietly landing on the wrong node, which looks like
+        // nothing at all until someone profiles remote memory traffic.
+        if (opt_.numa_node != detail::numa::any_node && opt_.on_error) {
+            if (!detail::numa::supported())
+                opt_.on_error("numa_node was requested but this build cannot bind memory; "
+                              "falling back to first touch");
+            else if (!detail::numa::node_in_range(opt_.numa_node))
+                opt_.on_error("numa_node is out of range on this machine; "
+                              "falling back to first touch");
+        }
+
         cfg_ = hot_config{opt_.drain_batch, opt_.spin_before_park, opt_.park_timeout, opt_.scan};
+
+        // Covers the slot array and every shard_state below. Rings are not
+        // allocated here -- they are bound separately in commission(), on the
+        // registering thread.
+        const detail::numa::scoped_node place{opt_.numa_node};
         slots_ = detail::aligned_array<producer_slot, cache_line>(opt_.max_producers);
 
         // Contiguous slot ranges per shard, not interleaved: a shard's bitmap
@@ -446,13 +466,20 @@ private:
         producer_slot& sl = slots_[i];
         try {
             // Allocated here, on the registering thread, so first touch places
-            // the pages on this producer's NUMA node.
+            // the pages on this producer's NUMA node. An explicit
+            // options::numa_node overrides that for the cases first touch
+            // cannot reach -- see detail/numa.hpp -- and the guard has to wrap
+            // the construction rather than the assignment, because the ring's
+            // storage is allocated inside the channel's constructor.
             //
             // A recycled slot keeps its ring. The free-running indices are
             // already consistent -- head == tail was checked at reclaim -- so
             // reuse costs no allocation at all. It does mean a recycled ring
             // keeps its original node placement.
-            if (!sl.channel) sl.channel = detail::make_aligned<Channel>(opt_.ring_capacity);
+            if (!sl.channel) {
+                const detail::numa::scoped_node place{opt_.numa_node};
+                sl.channel = detail::make_aligned<Channel>(opt_.ring_capacity);
+            }
         } catch (...) {
             sl.state.store(slot_state::free, std::memory_order_release);
             throw;

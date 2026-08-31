@@ -313,11 +313,11 @@ build in than to retrofit), but are only lightly tested — Phase B owns proving
 - [x] Two-level `active_set` exercised with >64 producers
 - [x] Sharded consumers: contiguous slot ranges, per-shard bitmap and park state on their own lines
 - [x] `own_threads == false` + `poll()` / `run()`
-- [ ] `detail/numa.hpp` (`VirtualAllocExNuma` / `mbind`), first-touch as the portable default
+- [x] `detail/numa.hpp` (`VirtualAllocExNuma` / `mbind`), first-touch as the portable default
 - [x] `options::validate()` wired, `on_error` wired
 - [x] Tests: missed-wakeup stress, >64 producers, shard disjointness, externally-driven mode —
-      `test/test_sharding.cpp`
-- **Gate:** TSan clean on Linux x86_64 **and ARM64**; sharded throughput scales with shard count
+      `test/test_sharding.cpp`; node binding and allocator pairing — `test/test_numa.cpp`
+- [x] **Gate:** TSan clean on Linux x86_64 **and ARM64**; sharded throughput scales with shard count
 
 #### Two deviations from the plan as written, recorded rather than left to be inferred
 
@@ -329,10 +329,29 @@ as a control, and TSan on x86-64 and ARM64. Everything else Phase D lists — cl
 clang-format gates, MSVC, macOS, the `TRIBUTARY_CACHE_LINE=128` build, the installed-`example/` smoke
 test — is still Phase D and still unwritten.
 
-**2. `detail/numa.hpp` is deferred.** It is the one item here with no correctness argument riding on
-it: placement is a runtime property of the machine, `detail::make_aligned` is already the single
-choke point it plugs into, and no part of the gate depends on it. Phase B is **not** complete until
-it lands or is explicitly moved.
+**2. `detail/numa.hpp` was deferred out of the first slice, and has now landed.** It was the one item
+here with no correctness argument riding on it: placement is a runtime property of the machine,
+`detail::make_aligned` was already the single choke point it plugs into, and no part of the gate
+depended on it.
+
+One design decision in it is not obvious and is worth recording, because the obvious shape is the
+wrong one. The node is **ambient** — a `thread_local` set by `numa::scoped_node` around an
+allocation — rather than a parameter. A parameter cannot reach the allocation that matters most:
+`fixed_channel::storage_` is allocated *inside* the channel's constructor, so threading a node into
+it means widening the `Channel` contract from `(std::size_t capacity)` to
+`(std::size_t capacity, int node)`. That contract is about to be written down as a `channel_for`
+concept in Phase C, and NUMA placement is a property of the machine, not of a channel type; encoding
+it into the concept every future channel must satisfy is the wrong seam. The ambient scope is
+exactly one allocation on the calling thread, which is what keeps it safe.
+
+The second thing it forced: binding is best-effort, so an allocation now comes back either bound
+(from `mmap`/`VirtualAllocExNuma`) or ordinary (from `::operator new`), and **which one is not
+recoverable from the pointer**. Every owner therefore carries the flag — this is why
+`aligned_deleter` is stateful. Freeing a bound block through `::operator delete` is undefined and
+silent, so `test_numa.cpp` runs a full pipeline on a bound node specifically to put the pairing under
+ASan and TSan. The flag lands in `_Compressed_pair`'s existing padding, so `producer_slot` is still
+`sizeof=64` with all fields in bytes 0–23 — decision 1 above is intact, verified with the layout
+dump rather than by reading the struct.
 
 #### Sharded throughput — the half of the gate that can be measured locally
 
@@ -359,6 +378,32 @@ reports a true number that reads as "sharding does not work". Phase 5's sink the
 deliberate fixed per-record cost — which is also why its M/s figures are **not** throughput figures
 for the library. Phase 2 has those.
 
+#### TSan — the half of the gate only CI can read
+
+Run against `6184cf8`, clang 18.1.3, `RelWithDebInfo`, `TSAN_OPTIONS=halt_on_error=1 exitcode=66`:
+
+```text
+leg                 result                    slowest suites
+linux-x64-release   6/6 passed  (control)
+linux-x64-tsan      6/6 passed
+linux-arm64-tsan    6/6 passed  28.9 s total  test_sharding 16.0 s, test_pipeline 11.4 s
+```
+
+**Clean on the first real run, on both architectures.** Three things about reading this result:
+
+- **ARM64 is the leg that counts**, and it is the one that had never been run. x86 is TSO and
+  reorders exactly one pair, StoreLoad — the pair the Dekker handshake in `active_set.hpp` exists to
+  survive — so a green x86 run is not evidence about the ordering argument. aarch64 is.
+- `halt_on_error=1 exitcode=66` is what makes the leg mean anything. Without it TSan prints its
+  report and the process still exits 0, ctest passes, and the gate silently asserts nothing.
+- The suites really ran under the sanitizer rather than being skipped: the binaries CI linked carry
+  the `_thread` suffix `TRIBUTARY_SAN_SUFFIX` adds, and `test_sharding` — the missed-wakeup and
+  >64-producer stress — took 16.0 s of the 28.9 s.
+
+The anticipated failure mode did not appear: TSan's `std::atomic_thread_fence` modelling is
+conservative, and a report against the `seq_cst` fence in `active_set::signal` would have needed
+reading against the argument there before being believed. Nothing to read.
+
 ### Phase C — variable-length records
 
 - Decide the drain seam **first**, while `fixed_channel` is still the only channel —
@@ -376,6 +421,15 @@ for the library. Phase 2 has those.
 - CI: ubuntu-24.04 (gcc-14, clang) Release/ASan+UBSan/TSan; ubuntu-24.04-arm Release/TSan;
   windows-2022 (MSVC, clang-cl) Release/ASan; macos-14 Release/TSan plus a
   `TRIBUTARY_CACHE_LINE=128` build; clang-tidy and clang-format gates
+- **The clang-format gate will fail on day one unless `.clang-format` is reconciled first.** The
+  codebase does not currently conform to its own config, and this is not drift in the code — it is
+  the config failing to record two deliberate choices. `IndentPPDirectives` is unset, so it defaults
+  to `None`, while `thread.hpp` and `numa.hpp` both indent their platform `#if` ladders two spaces
+  after the hash for readability; setting `IndentPPDirectives: AfterHash` with `PPIndentWidth: 2`
+  takes `thread.hpp` from 10 violations to 1 and `numa.hpp` from 16 to 6. Separately `pipeline.hpp`
+  has 17 violations that predate any of this. Decide config-vs-code once, apply it in a single
+  formatting commit with no behaviour change in it, and only then turn the gate on — otherwise the
+  first green run is a reformat of the whole library mixed into whatever change happened to enable it
 - `DESIGN.md` — ordering arguments, the bitmap proof, the four decisions above, and "when the mutex
   wins". A library must say when it is the wrong choice.
 
