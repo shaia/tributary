@@ -60,6 +60,7 @@ inline namespace TRIBUTARY_ABI {
 // rather than in the loop. See drain.hpp.
 template <channel_for Channel, class Traits = default_traits,
           class Drain = staged_drain<Channel, Traits>>
+    requires drain_for<Drain>
 class basic_pipeline {
 public:
     using channel_type = Channel;
@@ -324,7 +325,7 @@ public:
 
     // Convenience for a single-shard pipeline.
     template <class S>
-        requires sink_for<S, batch_type>
+        requires sink_for<S, batch_type> && drains_into<Drain, Channel, S>
     void start(S& sink) {
         S* one[1] = {&sink};
         start(std::span<S* const>(one, 1));
@@ -333,7 +334,7 @@ public:
     // One sink per shard. The library imposes no thread-safety requirement on
     // your sink, which is why it will not share one across consumers.
     template <class S>
-        requires sink_for<S, batch_type>
+        requires sink_for<S, batch_type> && drains_into<Drain, Channel, S>
     void start(std::span<S* const> sinks) {
         if (sinks.size() != shards_.size())
             throw std::invalid_argument("tributary: start() needs exactly one sink per consumer");
@@ -356,7 +357,7 @@ public:
     // when you want to own the thread but keep the library's idling, parking
     // and shutdown behaviour.
     template <class S>
-        requires sink_for<S, batch_type>
+        requires sink_for<S, batch_type> && drains_into<Drain, Channel, S>
     void run(std::uint32_t shard, S& sink) {
         consume(*shards_[shard], sink, shard);
     }
@@ -368,7 +369,7 @@ public:
     // After stop(), keep calling this until it returns 0 to complete the final
     // drain, then close(shard, sink).
     template <class S>
-        requires sink_for<S, batch_type>
+        requires sink_for<S, batch_type> && drains_into<Drain, Channel, S>
     std::size_t poll(std::uint32_t shard, S& sink) {
         shard_state& sh = *shards_[shard];
         const std::size_t n = drain_pass(sh, sink);
@@ -379,7 +380,7 @@ public:
     }
 
     template <class S>
-        requires sink_for<S, batch_type>
+        requires sink_for<S, batch_type> && drains_into<Drain, Channel, S>
     void close(std::uint32_t shard, S& sink) {
         final_drain(*shards_[shard], sink);
     }

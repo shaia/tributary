@@ -27,6 +27,7 @@
 #include "traits.hpp"
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -46,6 +47,39 @@ inline namespace TRIBUTARY_ABI {
 struct drain_config {
     std::size_t batch_capacity;  // staging buffer size
     std::size_t drain_batch;     // taken from one ring in one pass
+};
+
+// What the pipeline requires of a drain strategy without knowing the sink type.
+//
+// This exists for the same reason `channel_for` does. An unconstrained template
+// parameter fails from wherever the consumer loop happens to touch it, naming a
+// line of pipeline.hpp and saying nothing about the strategy that is wrong --
+// which is the defect the seam was extracted to remove, so leaving the new
+// parameter unconstrained would have reintroduced it one level up.
+template <class D>
+concept drain_for = requires(const D& cd) {
+    requires std::constructible_from<D, const drain_config&>;
+
+    // Whether the sink still owes an accept. The idle path tests this before
+    // parking, with no sink in hand, so it cannot be a sink-templated member.
+    { cd.pending() } noexcept -> std::same_as<bool>;
+
+    // Folded into stats::sink_backpressure.
+    { cd.backpressure() } noexcept -> std::convertible_to<std::uint64_t>;
+};
+
+// The other half, which only becomes checkable where the sink type is known.
+// The pipeline applies it at each public entry point that takes a sink, beside
+// `sink_for`, so a strategy that cannot drain into *your* sink is rejected at
+// start() rather than from inside drain_ring.
+//
+// Neither member is required to be noexcept, and `staged_drain`'s are not: both
+// are reached only through the consumer loop, which is where the sink's own
+// noexcept requirement is already doing that work.
+template <class D, class Channel, class S>
+concept drains_into = drain_for<D> && requires(D& d, Channel& ch, S& sink) {
+    { d.take(ch, sink) } -> std::convertible_to<std::size_t>;
+    { d.flush(sink) } -> std::convertible_to<std::size_t>;
 };
 
 // Copy-out drain for a channel of fixed-size events.
