@@ -493,6 +493,46 @@ reading against the argument there before being believed. Nothing to read.
   (`drain_config`, `staged_drain`), with `Drain` as `basic_pipeline`'s third parameter. See "The
   `Channel` parameter is now the seam this needs" above for the decision, the gate, and the one
   thing still owed on it.
+- [x] **Close the two remaining holes in that seam**, on the same argument and for the same reason:
+  they are cheap now and get expensive the moment `bytes_channel` exists. Reading the merged code
+  against what `bytes_channel` needs turned up two places the seam still did not admit it.
+
+  **The producer handle had no zero-copy path.** `push` copies; the whole point of this phase is
+  writing into ring memory. `claimable_channel` is now the producer-side sibling of
+  `staged_channel` — the two are the ends of the same avoid-a-copy argument, and a channel may
+  satisfy either, both or neither. `producer::try_claim`/`commit` are constrained on it.
+
+  Two things in there are load-bearing. **`commit` carries the wakeup signal, not `try_claim`**:
+  the signal must follow the release-store that publishes the event, and for a claim that store is
+  at commit. And both members are **member templates with a defaulted parameter**, because a plain
+  member returning `typename Channel::claim_type` has its declaration instantiated with the class,
+  which would make merely naming `basic_pipeline<fixed_channel<T>>` a hard error.
+
+  `claim_type` is channel-defined rather than a bare span, so `bytes_channel` can carry back the
+  frame offset or the padding frame it had to emit. There is no `abort`: an uncommitted claim
+  publishes nothing. Add one only if pad-to-wrap turns out to need unwinding.
+
+  **`pending()`/`flush()` are handed no channel, and a zero-copy strategy owns no buffer.** The
+  obvious fix — widen the concept — is wrong, because the pipeline does not know which channel is
+  owed at idle time either and would have to scan. **No interface change.** Instead two behavioural
+  rules, stated in `drain.hpp` and exercised by `test_seam.cpp`:
+
+  1. *Cache the channel you are owed a retry on.* The pointer cannot dangle, and the argument is
+     the interesting part: `reclaim_retired` publishes a slot `free` only after finding its ring
+     empty, and a zero-copy strategy is owed a retry exactly when it has released nothing — so the
+     ring is non-empty and the slot cannot be reclaimed underneath it. An invariant that already
+     had to hold for another reason turns out to carry this one too.
+  2. *Once the sink refuses within a pass, stop offering until a flush succeeds*, so at most one
+     channel is ever owed. This is about shutdown honesty, not politeness: `final_drain` retries
+     `flush()` alone, so a second owed ring would go out unreported and break the promise that a
+     `drain` stop loses nothing and says so when it did not.
+
+  **Gate:** the same code-level instrument the drain seam used, and it reads clean —
+  `producer::push`, `drain_ring`, `stop` and `register_producer` all have identical ordered
+  mnemonic sequences against `main`, and the bench TU's total `.text` is byte-for-byte 50106 in
+  both. The change is additive. `test_seam.cpp` stands a variable-length channel and a zero-copy
+  strategy up in place of the shipped pair and runs a real pipeline through them, so the seam is
+  known to work rather than hoped to.
 - `event.hpp`, `bytes_channel`, zero-copy `try_claim`/`commit`, frame-boundary partial release
 - Tests: wrap-with-padding, exact payload round-trip, zero-length and maximum-size events, and a
   partial-accept sink asserting the output is exactly the concatenation of what was pushed

@@ -214,6 +214,65 @@ public:
             return true;
         }
 
+        // --- zero-copy push ----------------------------------------------
+        //
+        // Reserve `n` units of ring memory, write into `claim.bytes()`, then
+        // commit what you used:
+        //
+        //     auto c = h.try_claim(len);
+        //     if (!c.valid()) return;          // dropped, and counted
+        //     std::memcpy(c.bytes().data(), src, len);
+        //     h.commit(c, len);
+        //
+        // Available only on a channel that can be written in place; on any
+        // other, calling these is a constraint failure naming
+        // `claimable_channel` rather than an error inside this class.
+        //
+        // The defaulted template parameter is what makes that true, and is not
+        // stylistic. A plain member returning `typename Channel::claim_type`
+        // would have its *declaration* instantiated with the class, so naming
+        // `basic_pipeline<fixed_channel<T>>` at all would be a hard error.
+        // Member templates are not instantiated until called. `C` is pinned to
+        // `Channel` so a caller cannot substitute anything else.
+        template <class C = Channel>
+            requires claimable_channel<C> && std::same_as<C, Channel>
+        [[nodiscard]] typename C::claim_type try_claim(std::size_t n) noexcept {
+            if (pipe_ == nullptr || !pipe_->accepting_.load(std::memory_order_acquire))
+                return typename C::claim_type{};
+
+            auto c = ch_->try_claim(n);
+            if (!c.valid() && full_ == full_policy::spin_then_drop) {
+                // The same bounded spin `push` makes, for the same reason: a
+                // producer's latency must never be coupled to the consumer's
+                // worst stall.
+                for (std::uint32_t i = 0; i < push_spin_ && !c.valid(); ++i) {
+                    TRIBUTARY_PAUSE();
+                    c = ch_->try_claim(n);
+                }
+            }
+            // Counted here rather than at commit: the event is lost at the
+            // moment the space could not be reserved, and a caller that checks
+            // valid() and gives up never reaches commit to report it.
+            if (!c.valid()) ch_->note_drop();
+            return c;
+        }
+
+        // Publishes the claim. Returns false only for a claim that failed, so
+        // that `if (h.commit(c, n))` reads the same way `if (h.push(v))` does.
+        template <class C = Channel>
+            requires claimable_channel<C> && std::same_as<C, Channel>
+        bool commit(typename C::claim_type& c, std::size_t used) noexcept {
+            if (pipe_ == nullptr || !c.valid()) return false;
+            ch_->commit(c, used);
+
+            // MUST follow the publish inside commit -- this is the same
+            // ordering `push` depends on, and the reason the claim path could
+            // not simply signal at try_claim time. signal() opens with a
+            // seq_cst fence for exactly this; see active_set.hpp.
+            if (sh_->active.signal(tok_)) pipe_->wake_if_parked(*sh_);
+            return true;
+        }
+
         // Idempotent. Marks the slot retiring; the consumer releases it once it
         // has drained the ring.
         void release() noexcept {
