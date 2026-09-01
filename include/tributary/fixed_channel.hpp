@@ -1,6 +1,6 @@
 #pragma once
 //
-// Bounded single-producer / single-consumer ring of fixed-size records.
+// Bounded single-producer / single-consumer ring of fixed-size events.
 //
 // This is where the memory ordering lives. Two release/acquire pairs, one per
 // direction, and no atomic read-modify-write on either side.
@@ -44,7 +44,7 @@ inline namespace TRIBUTARY_ABI {
 template <class T, class Traits = default_traits>
 class alignas(Traits::cache_line) fixed_channel {
     static_assert(std::is_trivially_copyable_v<T>,
-                  "records travel by value through preallocated storage, so a push must be a "
+                  "events travel by value through preallocated storage, so a push must be a "
                   "memcpy: no allocation, no indirection, no shared ownership on the hot path");
     static_assert(std::is_default_constructible_v<T>,
                   "ring storage is value-constructed once at registration");
@@ -100,7 +100,7 @@ public:
     // --- consumer side -----------------------------------------------------
 
     // Copies out at most max_items and frees their slots with a single release
-    // store, so a 512-record drain costs one cross-core write, not 512.
+    // store, so a 512-event drain costs one cross-core write, not 512.
     std::size_t pop_batch(T* out, std::size_t max_items) noexcept {
         if (max_items == 0) return 0;
         const std::uint64_t h = head_.load(std::memory_order_relaxed);  // sole writer

@@ -1,8 +1,8 @@
 // Phase 1 -- correctness under stress.
 //
 // This phase reports no timings. It exists so that the numbers the other phases
-// report come from a pipeline that was actually delivering records correctly
-// while it was being measured. A fast pipeline that loses or reorders records is
+// report come from a pipeline that was actually delivering events correctly
+// while it was being measured. A fast pipeline that loses or reorders events is
 // just a fast way to be wrong, and every failure mode here is silent: nothing
 // crashes, nothing warns, the throughput looks fine.
 //
@@ -35,15 +35,15 @@ constexpr std::uint32_t kChurnPerProducer = 2'000;
 // This phase's sink, and only this phase's.
 //
 // Ordering is validated from inside the consumer thread, because that is the
-// only place records are seen in the order the pipeline actually delivered them.
-// The library deliberately has no per-record hook for this: a std::function on
+// only place events are seen in the order the pipeline actually delivered them.
+// The library deliberately has no per-event hook for this: a std::function on
 // that path would be a cost every production user pays for a benchmark's sake.
 class ordering_sink {
 public:
     explicit ordering_sink(std::uint32_t max_producers)
         : last_(max_producers, 0), seen_(max_producers, 0) {}
 
-    std::size_t write(std::span<const record> b) noexcept {
+    std::size_t write(std::span<const event> b) noexcept {
         for (const auto& r : b) {
             if (r.producer_id < last_.size()) {
                 // A gap is legal -- that is a counted drop. Going backwards or
@@ -64,11 +64,11 @@ public:
                 ++violations_;
             }
         }
-        records_ += b.size();
+        events_ += b.size();
         return b.size();
     }
 
-    [[nodiscard]] std::uint64_t records() const noexcept { return records_; }
+    [[nodiscard]] std::uint64_t events() const noexcept { return events_; }
     [[nodiscard]] std::uint64_t violations() const noexcept { return violations_; }
 
     [[nodiscard]] std::string first_violation() const {
@@ -80,7 +80,7 @@ public:
 private:
     std::vector<std::uint64_t> last_;
     std::vector<std::uint8_t> seen_;  // not vector<bool>: no reason for a proxy here
-    std::uint64_t records_ = 0;
+    std::uint64_t events_ = 0;
     std::uint64_t violations_ = 0;
     std::uint32_t bad_id_ = 0;
     std::uint64_t bad_seq_ = 0;
@@ -95,10 +95,10 @@ void under_stress(scan_policy scan) {
     opt.max_producers = 32;
     opt.scan = scan;
     // Spin first: this phase is about ordering and accounting, and a run that
-    // drops 90% of its records exercises far less of the delivery path.
+    // drops 90% of its events exercises far less of the delivery path.
     opt.full = full_policy::spin_then_drop;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
     ordering_sink sink(opt.max_producers);
     pipe.start(sink);
 
@@ -116,7 +116,7 @@ void under_stress(scan_policy scan) {
             auto h = pipe.register_producer();
             gate.arrive_and_wait();
             if (!h) return;
-            record r{};
+            event r{};
             r.producer_id = h.id();
             for (std::uint32_t s = 1; s <= kPerProducer; ++s) {
                 r.seq = s;
@@ -133,12 +133,12 @@ void under_stress(scan_policy scan) {
     std::printf("  %-10s pushed=%llu dropped=%llu delivered=%llu probes/pass=%.2f writes=%llu\n",
                 name, static_cast<unsigned long long>(st.pushed),
                 static_cast<unsigned long long>(st.dropped),
-                static_cast<unsigned long long>(sink.records()), st.probes_per_pass(),
+                static_cast<unsigned long long>(sink.events()), st.probes_per_pass(),
                 static_cast<unsigned long long>(st.bitmap_writes));
 
     check(sink.violations() == 0, tag + "per-producer order preserved");
     check(st.pushed + st.dropped == offered, tag + "pushed + dropped == offered, exactly");
-    check(sink.records() == st.pushed, tag + "a drain stop lost nothing");
+    check(sink.events() == st.pushed, tag + "a drain stop lost nothing");
     check(st.consumed == st.pushed, tag + "the consumer's count agrees with the sink");
     check(pipe.drain_completed(), tag + "the drain finished inside its deadline");
     check(st.high_water <= opt.ring_capacity, tag + "ring depth never exceeded capacity");
@@ -148,7 +148,7 @@ void under_stress(scan_policy scan) {
 // Slots recycled through many waves.
 //
 // The assertion that matters is that every REGISTRATION SUCCEEDS. A churn test
-// that only checks that registered producers' records survive cannot see the
+// that only checks that registered producers' events survive cannot see the
 // failure this guards: a consumer that never goes idle never publishes retired
 // slots free, so new producers silently get nothing at all, and every such
 // failure is a producer thread that produces no data and reports no error.
@@ -157,7 +157,7 @@ void churn() {
     opt.max_producers = kChurnSlots;
     opt.full = full_policy::spin_then_drop;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
     ordering_sink sink(opt.max_producers);
     pipe.start(sink);
 
@@ -189,7 +189,7 @@ void churn() {
                 if (!h) return;
                 const std::uint32_t tag = next_tag.fetch_add(1, std::memory_order_relaxed);
                 got[p] = 1;
-                record r{};
+                event r{};
                 r.producer_id = h.id();
                 for (std::uint32_t s = 1; s <= kChurnPerProducer; ++s) {
                     r.seq = tag * kChurnPerProducer + s;
@@ -213,14 +213,14 @@ void churn() {
                 static_cast<unsigned long long>(attempts),
                 static_cast<unsigned long long>(st.pushed),
                 static_cast<unsigned long long>(st.dropped),
-                static_cast<unsigned long long>(sink.records()));
+                static_cast<unsigned long long>(sink.events()));
 
     check(registered == attempts,
           "all " + std::to_string(attempts) + " registrations succeeded across " +
               std::to_string(kWaves) + " waves through " + std::to_string(kChurnSlots) + " slots");
     check(st.registration_failures == 0, "churn: no registration was refused");
     check(st.pushed + st.dropped == expected_pushes, "churn: pushed + dropped == offered");
-    check(sink.records() == st.pushed, "churn: a retired producer's records still arrived");
+    check(sink.events() == st.pushed, "churn: a retired producer's events still arrived");
     check(sink.violations() == 0,
           "churn: order held across slot reuse (" + std::to_string(sink.violations()) +
               " violations, first: " + sink.first_violation() + ")");
@@ -230,7 +230,7 @@ void churn() {
 
 void bench_correctness() {
     std::printf("\n=== phase 1: correctness under stress ===\n");
-    std::printf("%u producers x %u records, both scan policies; then %u waves of %u through %u slots\n\n",
+    std::printf("%u producers x %u events, both scan policies; then %u waves of %u through %u slots\n\n",
                 static_cast<unsigned>(kProducers), static_cast<unsigned>(kPerProducer),
                 static_cast<unsigned>(kWaves), static_cast<unsigned>(kWaveProducers),
                 static_cast<unsigned>(kChurnSlots));

@@ -29,7 +29,7 @@ namespace tributary::bench {
 namespace {
 
 constexpr std::uint32_t kProducers = 8;
-constexpr double kRatePerProducer = 200'000.0;  // records/s each, well past the sink
+constexpr double kRatePerProducer = 200'000.0;  // events/s each, well past the sink
 constexpr std::int64_t kRunNs = 400'000'000;    // 400 ms of overload
 constexpr std::int64_t kStartDelayNs = 20'000'000;
 constexpr std::int64_t kSinkDelayNs = 500'000;  // 500 us per batch
@@ -47,18 +47,18 @@ constexpr std::int64_t kMaxPushNs = 50'000'000;  // 50 ms
 // tick, which would make the delay 1-15 ms instead of the 500 us asked for.
 class slow_sink {
 public:
-    std::size_t write(std::span<const record> b) noexcept {
+    std::size_t write(std::span<const event> b) noexcept {
         const std::int64_t until = now_ns() + kSinkDelayNs;
         while (now_ns() < until) TRIBUTARY_PAUSE();
-        records_.fetch_add(b.size(), std::memory_order_relaxed);
+        events_.fetch_add(b.size(), std::memory_order_relaxed);
         return b.size();
     }
-    [[nodiscard]] std::uint64_t records() const noexcept {
-        return records_.load(std::memory_order_relaxed);
+    [[nodiscard]] std::uint64_t events() const noexcept {
+        return events_.load(std::memory_order_relaxed);
     }
 
 private:
-    std::atomic<std::uint64_t> records_{0};
+    std::atomic<std::uint64_t> events_{0};
 };
 
 void overload() {
@@ -70,7 +70,7 @@ void overload() {
     // not block indefinitely.
     opt.full = full_policy::spin_then_drop;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
     slow_sink sink;
     pipe.start(sink);
 
@@ -92,7 +92,7 @@ void overload() {
                 const std::int64_t due = pc.due(i);
                 if (due >= end) break;
                 pacer::spin_until(due);
-                record r{};
+                event r{};
                 r.producer_id = h.id();
                 r.seq = static_cast<std::uint32_t>(i + 1);
                 r.send_ns = due;
@@ -150,22 +150,22 @@ void overload() {
 // Refuses everything until opened, then accepts everything.
 //
 // This is the shape that strands a remainder. If flush is only reached when a
-// drain pass moved records, a sink holding a partial write has nothing to drive
+// drain pass moved events, a sink holding a partial write has nothing to drive
 // a retry once the traffic stops -- and it stops precisely when the far side is
 // in trouble. on_idle() is the hook that closes it.
 class stalling_sink {
 public:
-    std::size_t write(std::span<const record> b) noexcept {
+    std::size_t write(std::span<const event> b) noexcept {
         if (!open_.load(std::memory_order_acquire)) {
             refusals_.fetch_add(1, std::memory_order_relaxed);
             return 0;
         }
-        records_.fetch_add(b.size(), std::memory_order_relaxed);
+        events_.fetch_add(b.size(), std::memory_order_relaxed);
         return b.size();
     }
 
     // Called before the consumer parks and on every park timeout. Reporting
-    // progress here is what gets a recovered sink unstuck with no new records
+    // progress here is what gets a recovered sink unstuck with no new events
     // arriving to drive another flush.
     bool on_idle() noexcept {
         idle_calls_.fetch_add(1, std::memory_order_relaxed);
@@ -175,8 +175,8 @@ public:
 
     void open() noexcept { open_.store(true, std::memory_order_release); }
 
-    [[nodiscard]] std::uint64_t records() const noexcept {
-        return records_.load(std::memory_order_relaxed);
+    [[nodiscard]] std::uint64_t events() const noexcept {
+        return events_.load(std::memory_order_relaxed);
     }
     [[nodiscard]] std::uint64_t refusals() const noexcept {
         return refusals_.load(std::memory_order_relaxed);
@@ -187,7 +187,7 @@ public:
 
 private:
     std::atomic<bool> open_{false};
-    std::atomic<std::uint64_t> records_{0};
+    std::atomic<std::uint64_t> events_{0};
     std::atomic<std::uint64_t> refusals_{0};
     std::atomic<std::uint64_t> idle_calls_{0};
 };
@@ -209,21 +209,21 @@ void stalled_sink_recovers() {
     // ring cannot drain, so offering more than it holds would drop the surplus
     // by policy -- correct behaviour, but it would make this phase's assertion
     // untestable rather than failing it for the reason under test.
-    constexpr std::uint32_t kRecords = 2'000;
+    constexpr std::uint32_t kEvents = 2'000;
 
     options opt;
     opt.max_producers = 2;
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
     stalling_sink sink;
     pipe.start(sink);
-    check(kRecords < opt.ring_capacity, "the stall test offers less than one ring holds");
+    check(kEvents < opt.ring_capacity, "the stall test offers less than one ring holds");
 
     std::uint64_t accepted = 0;
     {
         auto h = pipe.register_producer();
-        record r{};
+        event r{};
         r.producer_id = h.id();
-        for (std::uint32_t s = 1; s <= kRecords; ++s) {
+        for (std::uint32_t s = 1; s <= kEvents; ++s) {
             r.seq = s;
             if (h.push(r)) ++accepted;
         }
@@ -231,7 +231,7 @@ void stalled_sink_recovers() {
 
     const bool refused = wait_for([&sink] { return sink.refusals() > 0; }, 2'000'000'000);
     check(refused, "the stalled sink actually refused a batch (the setup is real)");
-    check(sink.records() == 0, "nothing was delivered while the sink was refusing");
+    check(sink.events() == 0, "nothing was delivered while the sink was refusing");
 
     // Wait for the consumer to actually reach its pre-park path before the sink
     // recovers. Without this it is usually still spinning when the sink opens,
@@ -240,21 +240,21 @@ void stalled_sink_recovers() {
     const bool went_idle = wait_for([&sink] { return sink.idle_calls() > 0; }, 2'000'000'000);
     check(went_idle, "the consumer went idle holding a refused remainder");
 
-    // The critical part: no further records are pushed from here. Recovery has
+    // The critical part: no further events are pushed from here. Recovery has
     // to be driven by on_idle() alone.
     const std::uint64_t idle_at_open = sink.idle_calls();
     sink.open();
     const bool drained =
-        wait_for([&sink, accepted] { return sink.records() >= accepted; }, 5'000'000'000);
+        wait_for([&sink, accepted] { return sink.events() >= accepted; }, 5'000'000'000);
 
     std::printf("  recovery   refusals=%llu idle_calls=%llu delivered=%llu/%llu accepted\n",
                 static_cast<unsigned long long>(sink.refusals()),
                 static_cast<unsigned long long>(sink.idle_calls()),
-                static_cast<unsigned long long>(sink.records()),
+                static_cast<unsigned long long>(sink.events()),
                 static_cast<unsigned long long>(accepted));
 
     check(sink.idle_calls() > idle_at_open, "on_idle() kept being called after recovery");
-    check(drained, "a recovered sink drained its remainder with no new records arriving");
+    check(drained, "a recovered sink drained its remainder with no new events arriving");
 
     pipe.stop(stop_mode::drain);
 }
@@ -263,7 +263,7 @@ void stalled_sink_recovers() {
 
 void bench_backpressure() {
     std::printf("\n=== phase 3: backpressure and shutdown ===\n");
-    std::printf("%u producers at %.0fk rec/s each against a %.0f us/batch sink\n\n",
+    std::printf("%u producers at %.0fk ev/s each against a %.0f us/batch sink\n\n",
                 static_cast<unsigned>(kProducers), kRatePerProducer / 1000.0,
                 static_cast<double>(kSinkDelayNs) / 1000.0);
 

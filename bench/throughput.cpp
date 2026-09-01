@@ -95,15 +95,15 @@ constexpr std::size_t kDrainBatch = 512;
 // a full batch would make the SINK the bottleneck and every row would be
 // reporting the checksum instead of the queue.
 struct drain_sink {
-    std::size_t write(std::span<const record> b) noexcept {
+    std::size_t write(std::span<const event> b) noexcept {
         const std::size_t stride = b.size() < 32 ? 1 : b.size() / 32;
         for (std::size_t i = 0; i < b.size(); i += stride)
             checksum = (checksum ^ b[i].seq) * 0x100000001b3ULL;
-        records += b.size();
+        events += b.size();
         return b.size();
     }
     std::uint64_t checksum = 0xcbf29ce484222325ULL;
-    std::uint64_t records = 0;
+    std::uint64_t events = 0;
 };
 
 struct cost_sample {
@@ -117,7 +117,7 @@ struct cost_sample {
 template <class Push>
 cost_sample run_bursts(std::uint32_t id, std::int64_t gap_ns, Push push) {
     cost_sample s;
-    record r{};
+    event r{};
     r.producer_id = id;
     std::uint32_t seq = 0;
     const std::int64_t t_end = now_ns() + kCostRunNs;
@@ -162,14 +162,14 @@ cost_result summarise(const std::vector<cost_sample>& per) {
 // --- arm A: the ring alone --------------------------------------------------
 
 cost_result push_cost_raw(std::uint32_t producers) {
-    std::vector<std::unique_ptr<fixed_channel<record>>> channels;
+    std::vector<std::unique_ptr<fixed_channel<event>>> channels;
     channels.reserve(producers);
     for (std::uint32_t i = 0; i < producers; ++i)
-        channels.push_back(std::make_unique<fixed_channel<record>>(4096));
+        channels.push_back(std::make_unique<fixed_channel<event>>(4096));
 
     std::atomic<bool> running{true};
     std::thread drainer([&channels, &running] {
-        std::vector<record> buf(kDrainBatch);
+        std::vector<event> buf(kDrainBatch);
         while (running.load(std::memory_order_relaxed))
             for (auto& ch : channels) ch->pop_batch(buf.data(), buf.size());
         for (auto& ch : channels)
@@ -182,9 +182,9 @@ cost_result push_cost_raw(std::uint32_t producers) {
     ts.reserve(producers);
     for (std::uint32_t p = 0; p < producers; ++p) {
         ts.emplace_back([&channels, &per, p, producers] {
-            fixed_channel<record>& ch = *channels[p];
+            fixed_channel<event>& ch = *channels[p];
             per[p] = run_bursts(p, gap_for(producers),
-                                [&ch](const record& r) { return ch.try_push(r); });
+                                [&ch](const event& r) { return ch.try_push(r); });
         });
     }
     for (auto& t : ts) t.join();
@@ -204,7 +204,7 @@ cost_result push_cost_pipeline(std::uint32_t producers) {
     // producer's measured cost, and this column is about the push itself.
     opt.full = full_policy::drop_newest;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
     drain_sink sink;
     pipe.start(sink);
 
@@ -216,7 +216,7 @@ cost_result push_cost_pipeline(std::uint32_t producers) {
             auto h = pipe.register_producer();
             if (!h) return;
             per[p] = run_bursts(h.id(), gap_for(producers),
-                                [&h](const record& r) { return h.push(r); });
+                                [&h](const event& r) { return h.push(r); });
         });
     }
     for (auto& t : ts) t.join();
@@ -239,7 +239,7 @@ sat_result run_saturating(std::uint32_t producers) {
     opt.scan = scan_policy::bitmap;
     opt.full = full_policy::drop_newest;
 
-    pipeline<record> pipe(opt);
+    pipeline<event> pipe(opt);
     drain_sink sink;
     pipe.start(sink);
 
@@ -251,7 +251,7 @@ sat_result run_saturating(std::uint32_t producers) {
         ts.emplace_back([&pipe, &attempts, &elapsed, p] {
             auto h = pipe.register_producer();
             if (!h) return;
-            record r{};
+            event r{};
             r.producer_id = h.id();
             std::uint64_t n = 0;
             const std::int64_t t0 = now_ns();
@@ -286,7 +286,7 @@ sat_result run_saturating(std::uint32_t producers) {
     r.sustained_mps = static_cast<double>(st.pushed) / secs / 1e6;
 
     // Accounting is checked, not trusted: a throughput number from a run that
-    // lost track of its records is not a throughput number.
+    // lost track of its events is not a throughput number.
     check(st.pushed + st.dropped == total,
           "pushed + dropped == offered at " + std::to_string(producers) + " producers");
     return r;

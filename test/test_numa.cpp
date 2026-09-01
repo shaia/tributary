@@ -116,7 +116,7 @@ void test_allocate_round_trip() {
 }
 
 // Runs a real pipeline end to end and returns nothing but its own assertions.
-// The point is not the record count -- other suites cover delivery -- it is
+// The point is not the event count -- other suites cover delivery -- it is
 // that every allocation the pipeline made (the slot array, each shard_state,
 // and one ring per producer) is released through the deallocator that matches
 // how it was obtained. Under ASan a mismatch is an immediate report; without
@@ -156,7 +156,7 @@ void run_pipeline_with_node(int node, const std::string& label) {
 
     pipe.stop(stop_mode::drain);
 
-    check_eq(sink.records(), kProducers * kPer, label + ": a drain stop delivered every record");
+    check_eq(sink.events(), kProducers * kPer, label + ": a drain stop delivered every event");
     check_eq(sink.violations(), 0, label + ": per-producer order preserved");
 
     // What on_error is expected to have said depends on *why* the node is
