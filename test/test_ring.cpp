@@ -10,6 +10,7 @@
 #include <tributary/fixed_channel.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <thread>
@@ -76,6 +77,45 @@ static_assert(!tributary::staged_channel<peek_only_channel>,
               "than decorative");
 static_assert(!tributary::channel_for<no_reset_channel>,
               "one missing member fails the contract, so the contract is not vacuous");
+
+// The producer-side half of the same split. `claim` is what a channel hands back
+// from try_claim; the pipeline never looks inside it, so a double this trivial
+// is enough to satisfy the concept.
+// NOLINTBEGIN(readability-convert-member-functions-to-static)
+struct claiming_channel : peek_only_channel {
+    using peek_only_channel::peek_only_channel;
+
+    struct claim {
+        bool valid() const noexcept { return false; }
+        std::span<std::byte> bytes() const noexcept { return {}; }
+    };
+    using claim_type = claim;
+
+    claim_type try_claim(std::size_t /*n*/) noexcept { return {}; }
+    void commit(claim_type& /*c*/, std::size_t /*used*/) noexcept {}
+};
+
+// Reserves but cannot publish. The half-written channel is the realistic
+// mistake here -- try_claim is the interesting one to write and commit is the
+// one that carries the release-store, so this is the shape a channel has partway
+// through being implemented.
+struct uncommittable_channel : claiming_channel {
+    using claiming_channel::claiming_channel;
+    void commit(claim_type&, std::size_t) = delete;
+};
+// NOLINTEND(readability-convert-member-functions-to-static)
+
+static_assert(tributary::claimable_channel<claiming_channel>,
+              "try_claim plus commit is the whole producer-side requirement");
+static_assert(!tributary::staged_channel<claiming_channel>,
+              "the two halves are independent: a channel may be written in place without being "
+              "drainable by copying out");
+static_assert(!tributary::claimable_channel<uncommittable_channel>,
+              "reserving without being able to publish is not a claimable channel, so this contract "
+              "is not vacuous either");
+static_assert(!tributary::claimable_channel<fixed_channel<event>>,
+              "fixed_channel is staged-only, and that is a design choice rather than a gap: at 32 "
+              "bytes the copy is cheaper than giving up cross-ring batching");
 
 void test_bounds_and_fifo() {
     std::printf("bounds and FIFO\n");

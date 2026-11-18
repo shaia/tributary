@@ -82,6 +82,40 @@ concept drains_into = drain_for<D> && requires(D& d, Channel& ch, S& sink) {
     { d.flush(sink) } -> std::convertible_to<std::size_t>;
 };
 
+// TWO RULES FOR A STRATEGY THAT STAGES NOTHING.
+//
+// Note that `pending()` and `flush()` are handed no channel. A staging strategy
+// owns its buffer, so it needs none. A zero-copy one refused by the sink owns
+// nothing -- the unaccepted events are still in the ring -- so it has to have
+// kept the channel itself. Widening the signature is the obvious alternative
+// and it is the wrong one: the pipeline does not know which channel is owed at
+// idle time either, and would have to scan to find out. The strategy already
+// knows, because `take` handed it the channel.
+//
+// These are behavioural, so no concept can hold them. Both are load-bearing.
+//
+// 1. CACHE THE CHANNEL YOU ARE OWED A RETRY ON. `take` records it on a short
+//    accept; `pending()` answers from it; `flush()` retries against it.
+//
+//    That cached pointer cannot dangle, and the argument is worth keeping
+//    written down because it rests on an invariant somewhere else.
+//    `reclaim_retired` publishes a slot `free` only after finding its ring
+//    empty, so a ring is never recycled while it still holds events. A
+//    zero-copy strategy is owed a retry exactly when it has released nothing,
+//    which means the ring is non-empty, which means the slot cannot be
+//    reclaimed underneath it. `commission` allocates only when the slot has no
+//    channel, so a recycled slot does not replace the object either.
+//
+// 2. ONCE THE SINK REFUSES WITHIN A PASS, STOP OFFERING until a flush succeeds,
+//    so at most one channel is ever owed.
+//
+//    This one is about shutdown honesty rather than politeness to the sink.
+//    `final_drain` drains to exhaustion and then retries `flush()` alone -- a
+//    second owed ring would never be re-offered, and its events would go out
+//    unreported, which breaks the promise that a `drain` stop loses nothing and
+//    says so when it did not. With this rule the first refusal ends the pass,
+//    one ring is owed, and the existing bounded tail loop covers it.
+
 // Copy-out drain for a channel of fixed-size events.
 template <class Channel, class Traits = default_traits>
 class staged_drain {

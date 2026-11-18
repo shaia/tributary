@@ -8,7 +8,8 @@ set(TRIBUTARY_TESTS
   test_backpressure
   test_shutdown
   test_sharding
-  test_numa)
+  test_numa
+  test_seam)
 
 foreach(name IN LISTS TRIBUTARY_TESTS)
   add_executable(${name} ${name}.cpp)

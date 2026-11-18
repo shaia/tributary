@@ -293,7 +293,7 @@ target_link_libraries(app PRIVATE tributary::tributary)
 
 | CMake option | Default | Meaning |
 |---|---|---|
-| `TRIBUTARY_BUILD_TESTS` | on when top-level | Build the test suite (7 CTest targets) |
+| `TRIBUTARY_BUILD_TESTS` | on when top-level | Build the test suite (8 CTest targets) |
 | `TRIBUTARY_BUILD_BENCH` | on when top-level | Build `tributary_bench` |
 | `TRIBUTARY_SANITIZER` | *(empty)* | `address`, `thread`, `undefined`, or `address,undefined`. Needs clang or gcc |
 | `TRIBUTARY_CACHE_LINE` | *(empty)* | Override the cache-line size used for layout |
@@ -430,10 +430,14 @@ production.
 ## Roadmap
 
 - **Done.** Fixed-size events, per-producer SPSC rings, the active-bitmap wakeup handshake,
-  consumer sharding, bounded two-mode shutdown, NUMA binding and consumer pinning, the drain seam.
+  consumer sharding, bounded two-mode shutdown, NUMA binding and consumer pinning, and both halves
+  of the extension seam a second event model plugs into.
 - **Next (Phase C).** Variable-length events: a `bytes_channel`, zero-copy `try_claim`/`commit`,
-  and frame-boundary partial release. `basic_pipeline`'s third template parameter is the seam this
-  plugs into — the drain strategy — so the ordering arguments do not have to be written twice.
+  and frame-boundary partial release. The seam is already in and already exercised — `Drain` as
+  `basic_pipeline`'s third parameter for the consumer side, `claimable_channel` and
+  `producer::try_claim`/`commit` for the producer side — so the ordering arguments do not have to
+  be written twice. `test_seam.cpp` runs a variable-length channel and a zero-copy drain strategy
+  through a real pipeline today, standing in for the channel that does not exist yet.
 - **Later (Phase D).** `DESIGN.md`, MSVC and macOS in CI, the `TRIBUTARY_CACHE_LINE=128` build,
   clang-tidy and clang-format gates, and an `example/` built against the installed package.
 
